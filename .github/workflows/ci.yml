@@ -1,0 +1,153 @@
+name: Action contract
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+env:
+  GOCACHE: ${{ github.workspace }}/.contract-build
+  GOMODCACHE: ${{ github.workspace }}/.contract-modules
+jobs:
+  smoke:
+    if: github.actor == 'ashtonian' && (github.event_name != 'pull_request' || github.event.pull_request.user.login == 'ashtonian')
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: "24"
+      - run: npm test
+      - uses: ./
+        with:
+          go-version-file: fixtures/go.work
+          workload: ${{ toJSON(matrix) }}
+          cache-key-prefix: smoke-v1
+      - run: go test -race ./...
+        working-directory: fixtures
+      - name: Validate workflow syntax
+        if: runner.os == 'Linux'
+        run: go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
+  seed:
+    if: github.actor == 'ashtonian' && (github.event_name != 'pull_request' || github.event.pull_request.user.login == 'ashtonian')
+    runs-on: ubuntu-latest
+    outputs:
+      key: ${{ steps.go.outputs.cache-primary-key }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: ./
+        id: go
+        with:
+          go-version: "1.26.9"
+          cache-key-prefix: probe-${{ github.run_id }}-${{ github.run_attempt }}
+      - run: |
+          mkdir -p "$GOCACHE" "$GOMODCACHE"
+          echo keep > "$GOCACHE/contract-sentinel"
+          echo old > "$GOCACHE/contract-stale"
+          touch -t 202001010000 "$GOCACHE/contract-stale"
+          go test ./...
+        working-directory: fixtures
+  restore:
+    needs: seed
+    runs-on: ubuntu-latest
+    outputs:
+      key: ${{ steps.go.outputs.cache-primary-key }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: ./
+        id: go
+        with:
+          go-version: "1.26.9"
+          cache-key-prefix: probe-${{ github.run_id }}-${{ github.run_attempt }}
+          cache-mode: read-only
+      - env:
+          MATCHED: ${{ steps.go.outputs.cache-matched-key }}
+          EXPECTED: ${{ needs.seed.outputs.key }}
+        run: |
+          test "$MATCHED" = "$EXPECTED"
+          test -f "$GOCACHE/contract-sentinel"
+          test ! -e "$GOCACHE/contract-stale"
+          echo reader > "$GOCACHE/reader-only"
+  disabled:
+    needs: seed
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: ./
+        id: go
+        with:
+          go-version: "1.26.9"
+          cache-key-prefix: probe-${{ github.run_id }}-${{ github.run_attempt }}
+          cache-mode: off
+      - env:
+          MATCHED: ${{ steps.go.outputs.cache-matched-key }}
+        run: |
+          test -z "$MATCHED"
+          test ! -e "$GOCACHE/contract-sentinel"
+  failed:
+    needs: seed
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    outputs:
+      key: ${{ steps.go.outputs.cache-primary-key }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: ./
+        id: go
+        with:
+          go-version: "1.26.9"
+          cache-key-prefix: failed-probe-${{ github.run_id }}-${{ github.run_attempt }}
+      - name: Intentional failure to verify post-save suppression
+        run: |
+          mkdir -p "$GOCACHE"
+          echo failed > "$GOCACHE/failed-only"
+          exit 17
+  verify:
+    if: always() && !cancelled() && github.actor == 'ashtonian'
+    needs: [seed, restore, disabled, failed, smoke]
+    runs-on: ubuntu-latest
+    steps:
+      - env:
+          SEED: ${{ needs.seed.result }}
+          RESTORE: ${{ needs.restore.result }}
+          DISABLED: ${{ needs.disabled.result }}
+          SMOKE: ${{ needs.smoke.result }}
+          FAILED_KEY: ${{ needs.failed.outputs.key }}
+          READER_KEY: ${{ needs.restore.outputs.key }}
+        run: |
+          test "$SEED" = success
+          test "$RESTORE" = success
+          test "$DISABLED" = success
+          test "$SMOKE" = success
+          test -n "$FAILED_KEY"
+          test -n "$READER_KEY"
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        id: failed
+        with:
+          path: |
+            ${{ env.GOCACHE }}
+            ${{ env.GOMODCACHE }}
+          key: ${{ needs.failed.outputs.key }}
+          lookup-only: true
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        id: reader
+        with:
+          path: |
+            ${{ env.GOCACHE }}
+            ${{ env.GOMODCACHE }}
+          key: ${{ needs.restore.outputs.key }}
+          lookup-only: true
+      - env:
+          FAILED_HIT: ${{ steps.failed.outputs.cache-hit }}
+          READER_HIT: ${{ steps.reader.outputs.cache-hit }}
+        run: |
+          test "$FAILED_HIT" != true
+          test "$READER_HIT" != true

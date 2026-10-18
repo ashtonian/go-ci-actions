@@ -1,0 +1,20 @@
+name: Manage cache working set
+description: Internal successful-job trim and measurements.
+inputs:
+  build:
+    description: Build cache directory.
+  modules:
+    description: Module cache directory.
+  start-ms:
+    description: Setup start timestamp.
+  max-staleness-hours:
+    description: Retention slack.
+  cache-mode:
+    description: Cache mode.
+  matched-key:
+    description: Restored key.
+runs:
+  using: node24
+  main: index.cjs
+  post: post.cjs
+  post-if: success()

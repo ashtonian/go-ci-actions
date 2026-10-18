@@ -1,0 +1,43 @@
+name: Resolve cache identity
+description: Internal resolved Go compiler and cache keys.
+inputs:
+  workflow:
+    description: Workflow name.
+  job:
+    description: Job identifier.
+  workload:
+    description: Additional workload.
+  dependency-hash:
+    description: Manifest hash.
+  os:
+    description: Runner OS.
+  arch:
+    description: Runner architecture.
+  run-id:
+    description: Run identifier.
+  run-attempt:
+    description: Attempt number.
+  cache-mode:
+    description: Cache mode.
+  cache-key-prefix:
+    description: Cache namespace.
+  seed-from-other-workloads:
+    description: Whether compatible workloads can seed misses.
+  max-staleness-hours:
+    description: Retention slack.
+outputs:
+  version:
+    description: Resolved compiler.
+  build:
+    description: Build cache directory.
+  modules:
+    description: Module cache directory.
+  key:
+    description: Fresh key.
+  restore-keys:
+    description: Ordered restore prefixes.
+  start-ms:
+    description: Setup start timestamp.
+runs:
+  using: node24
+  main: index.cjs
