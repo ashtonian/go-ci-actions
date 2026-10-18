@@ -92,6 +92,26 @@ jobs:
         run: |
           test -z "$MATCHED"
           test ! -e "$GOCACHE/contract-sentinel"
+  warm:
+    needs: [seed, restore]
+    runs-on: ubuntu-latest
+    outputs:
+      key: ${{ steps.go.outputs.cache-primary-key }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: ./
+        id: go
+        with:
+          go-version: "1.26.9"
+          cache-key-prefix: probe-${{ github.run_id }}-${{ github.run_attempt }}
+      - name: Assert read-write restore outputs
+        env:
+          MATCHED: ${{ steps.go.outputs.cache-matched-key }}
+          EXPECTED: ${{ needs.seed.outputs.key }}
+        run: |
+          test "$MATCHED" = "$EXPECTED"
+          test -f "$GOCACHE/contract-sentinel"
+          test ! -e "$GOCACHE/contract-stale"
   failed:
     needs: seed
     runs-on: ubuntu-latest
@@ -112,7 +132,7 @@ jobs:
           exit 17
   verify:
     if: always() && !cancelled() && github.actor == 'ashtonian'
-    needs: [seed, restore, disabled, failed, smoke]
+    needs: [seed, restore, disabled, failed, smoke, warm]
     runs-on: ubuntu-latest
     steps:
       - env:
@@ -120,6 +140,7 @@ jobs:
           RESTORE: ${{ needs.restore.result }}
           DISABLED: ${{ needs.disabled.result }}
           SMOKE: ${{ needs.smoke.result }}
+          WARM: ${{ needs.warm.result }}
           FAILED_KEY: ${{ needs.failed.outputs.key }}
           READER_KEY: ${{ needs.restore.outputs.key }}
         run: |
@@ -127,8 +148,17 @@ jobs:
           test "$RESTORE" = success
           test "$DISABLED" = success
           test "$SMOKE" = success
+          test "$WARM" = success
           test -n "$FAILED_KEY"
           test -n "$READER_KEY"
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        id: warm
+        with:
+          path: |
+            ${{ env.GOCACHE }}
+            ${{ env.GOMODCACHE }}
+          key: ${{ needs.warm.outputs.key }}
+          lookup-only: true
       - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         id: failed
         with:
@@ -148,6 +178,8 @@ jobs:
       - env:
           FAILED_HIT: ${{ steps.failed.outputs.cache-hit }}
           READER_HIT: ${{ steps.reader.outputs.cache-hit }}
+          WARM_HIT: ${{ steps.warm.outputs.cache-hit }}
         run: |
           test "$FAILED_HIT" != true
           test "$READER_HIT" != true
+          test "$WARM_HIT" = true

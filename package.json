@@ -1,6 +1,6 @@
 {
   "name": "go-ci-actions",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "private": true,
   "description": "Repository-scoped Go setup and cache policy",
   "scripts": {"test": "node --test test/*.test.cjs"},

@@ -19,6 +19,12 @@ used early in long jobs. Failed/cancelled jobs do not publish state; read-only
 mode does not prune or publish; off touches neither cache. Inputs are data to
 Node, never interpolated shell commands.
 
+Restore and save registration use separate official steps. The restore action
+exposes the actual matched key for both cache modes. The combined cache action
+registers a successful post-save with lookup-only and no fallback keys, avoiding
+a second download. The read-write warm-cache contract also verifies the published
+key output and the existence of its new saved entry.
+
 Rollout: local policy/lifecycle tests, packaged Linux/macOS smoke and native
 cache lifecycle probes, small consumer canaries, then remaining repositories.
 Consumers pin only an exact action commit that passed. Existing commands,
