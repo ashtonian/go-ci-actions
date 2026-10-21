@@ -112,6 +112,39 @@ jobs:
           test "$MATCHED" = "$EXPECTED"
           test -f "$GOCACHE/contract-sentinel"
           test ! -e "$GOCACHE/contract-stale"
+  # A runner that provides a remote build cache: GOCACHEPROG_REMOTE_URL and
+  # gocacheprog on PATH. The stub plugin is never started.
+  remote:
+    if: github.actor == 'ashtonian' && (github.event_name != 'pull_request' || github.event.pull_request.user.login == 'ashtonian')
+    runs-on: ubuntu-latest
+    outputs:
+      key: ${{ steps.go.outputs.cache-primary-key }}
+    env:
+      GOCACHEPROG_REMOTE_URL: http://127.0.0.1:9
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install a stub plugin
+        run: |
+          mkdir -p "$RUNNER_TEMP/plugin-bin"
+          printf '#!/bin/sh\nexit 1\n' > "$RUNNER_TEMP/plugin-bin/gocacheprog"
+          chmod +x "$RUNNER_TEMP/plugin-bin/gocacheprog"
+          echo "$RUNNER_TEMP/plugin-bin" >> "$GITHUB_PATH"
+      - uses: ./
+        id: go
+        with:
+          go-version: "1.26.9"
+          cache-key-prefix: remote-probe-${{ github.run_id }}-${{ github.run_attempt }}
+      - name: Assert the plugin owns the build cache
+        env:
+          BACKEND: ${{ steps.go.outputs.build-cache-backend }}
+          KEY: ${{ steps.go.outputs.cache-primary-key }}
+        run: |
+          test "$BACKEND" = remote
+          test "$GOCACHEPROG" = "$RUNNER_TEMP/plugin-bin/gocacheprog"
+          test "$GOCACHEPROG_DIR" = "$RUNNER_TEMP/gocacheprog"
+          case "$KEY" in remote-probe-*-mod-*) ;; *) echo "unexpected key $KEY"; exit 1 ;; esac
+          mkdir -p "$GOMODCACHE"
+          echo module > "$GOMODCACHE/remote-sentinel"
   failed:
     needs: seed
     runs-on: ubuntu-latest
@@ -132,7 +165,7 @@ jobs:
           exit 17
   verify:
     if: always() && !cancelled() && github.actor == 'ashtonian'
-    needs: [seed, restore, disabled, failed, smoke, warm]
+    needs: [seed, restore, disabled, failed, smoke, warm, remote]
     runs-on: ubuntu-latest
     steps:
       - env:
@@ -141,6 +174,7 @@ jobs:
           DISABLED: ${{ needs.disabled.result }}
           SMOKE: ${{ needs.smoke.result }}
           WARM: ${{ needs.warm.result }}
+          REMOTE: ${{ needs.remote.result }}
           FAILED_KEY: ${{ needs.failed.outputs.key }}
           READER_KEY: ${{ needs.restore.outputs.key }}
         run: |
@@ -149,6 +183,7 @@ jobs:
           test "$DISABLED" = success
           test "$SMOKE" = success
           test "$WARM" = success
+          test "$REMOTE" = success
           test -n "$FAILED_KEY"
           test -n "$READER_KEY"
       - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -175,11 +210,29 @@ jobs:
             ${{ env.GOMODCACHE }}
           key: ${{ needs.restore.outputs.key }}
           lookup-only: true
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        id: remote-modules
+        with:
+          path: ${{ env.GOMODCACHE }}
+          key: ${{ needs.remote.outputs.key }}
+          lookup-only: true
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        id: remote-build
+        with:
+          path: |
+            ${{ env.GOCACHE }}
+            ${{ env.GOMODCACHE }}
+          key: ${{ needs.remote.outputs.key }}
+          lookup-only: true
       - env:
           FAILED_HIT: ${{ steps.failed.outputs.cache-hit }}
           READER_HIT: ${{ steps.reader.outputs.cache-hit }}
           WARM_HIT: ${{ steps.warm.outputs.cache-hit }}
+          REMOTE_MODULES_HIT: ${{ steps.remote-modules.outputs.cache-hit }}
+          REMOTE_BUILD_HIT: ${{ steps.remote-build.outputs.cache-hit }}
         run: |
           test "$FAILED_HIT" != true
           test "$READER_HIT" != true
           test "$WARM_HIT" = true
+          test "$REMOTE_MODULES_HIT" = true
+          test "$REMOTE_BUILD_HIT" != true

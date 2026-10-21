@@ -11,6 +11,8 @@ inputs:
     description: Retention slack.
   cache-mode:
     description: Cache mode.
+  backend:
+    description: Build cache backend in use.
   matched-key:
     description: Restored key.
 runs:
