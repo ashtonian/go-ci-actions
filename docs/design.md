@@ -8,10 +8,21 @@ Official actions own compiler installation and cache transport. Our code owns
 compiler resolution, cache identities, input validation and working-set pruning.
 It does not implement a cache service or choose consumer test commands.
 
-Module/build paths remain in one archive for existing warm-cache compatibility.
-Separating archives or adding a backend requires measured transfer, duplication
-or eviction cost that warrants more restore/save operations. Compatible
-cross-workload seeding can be disabled per consumer.
+With the GitHub backend, module/build paths remain in one archive for existing
+warm-cache compatibility. Compatible cross-workload seeding can be disabled
+per consumer.
+
+The remote backend exists because of measured eviction, as this document
+requires for a new backend. On 2026-10-21 the three largest consumers each
+held about 10 GiB, GitHub's per-repository limit. In one, BuildKit layer
+blobs (7.8 GiB) had evicted every Go entry. The other two kept one to two
+days of 390-550 MiB archives, which every job downloaded whole and every
+successful job saved again. A runner that provides a GOCACHEPROG plugin
+serves build objects per action instead: a job fetches only what it
+compiles, and nothing per job is archived. The runner, not this action, owns
+the plugin, its endpoint and the write authorization; the action only
+detects them and exports the plugin variables. Modules stay in the GitHub
+cache, saved once per workload and manifest set.
 
 The lifecycle hook is declared after actions/cache, so reverse post ordering
 prunes before upload. Its cutoff is relative to setup start, preserving objects

@@ -32,6 +32,9 @@ inputs:
   max-staleness-hours:
     description: Retain build objects used since setup start minus this many hours.
     default: "2"
+  build-cache-backend:
+    description: "auto uses the runner's remote build cache when it provides one; github keeps build objects in the GitHub cache."
+    default: auto
 outputs:
   go-version:
     description: Version installed by setup-go.
@@ -39,14 +42,17 @@ outputs:
   actual-toolchain:
     description: GOVERSION resolved in this workspace.
     value: ${{ steps.identity.outputs.version }}
+  build-cache-backend:
+    description: "Where build objects live: github, remote, or off."
+    value: ${{ steps.identity.outputs.backend }}
   cache-primary-key:
-    description: Fresh key for this run and attempt.
+    description: Key this job saves under; fresh per run unless the build cache is remote.
     value: ${{ steps.identity.outputs.key }}
   cache-matched-key:
     description: Restored key or empty on a miss.
     value: ${{ steps.restore.outputs.cache-matched-key }}
   cache-hit:
-    description: Exact key hit; normally false with fresh run keys.
+    description: Exact key hit. Normally false with the GitHub backend's fresh run keys; true with the remote backend once the workload's module archive exists.
     value: ${{ steps.restore.outputs.cache-hit || 'false' }}
 runs:
   using: composite
@@ -73,23 +79,20 @@ runs:
         cache-key-prefix: ${{ inputs.cache-key-prefix }}
         seed-from-other-workloads: ${{ inputs.seed-from-other-workloads }}
         max-staleness-hours: ${{ inputs.max-staleness-hours }}
+        build-cache-backend: ${{ inputs.build-cache-backend }}
     - name: Restore Go cache
       if: inputs.cache-mode != 'off'
       id: restore
       uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       with:
-        path: |
-          ${{ steps.identity.outputs.build }}
-          ${{ steps.identity.outputs.modules }}
+        path: ${{ steps.identity.outputs.paths }}
         key: ${{ steps.identity.outputs.key }}
         restore-keys: ${{ steps.identity.outputs.restore-keys }}
     - name: Register successful post-save without downloading again
       if: inputs.cache-mode == 'read-write' && steps.restore.outputs.cache-hit != 'true'
       uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       with:
-        path: |
-          ${{ steps.identity.outputs.build }}
-          ${{ steps.identity.outputs.modules }}
+        path: ${{ steps.identity.outputs.paths }}
         key: ${{ steps.identity.outputs.key }}
         lookup-only: true
     # Reverse post ordering trims before the official cache action uploads.
@@ -101,4 +104,5 @@ runs:
         start-ms: ${{ steps.identity.outputs.start-ms }}
         max-staleness-hours: ${{ inputs.max-staleness-hours }}
         cache-mode: ${{ inputs.cache-mode }}
+        backend: ${{ steps.identity.outputs.backend }}
         matched-key: ${{ steps.restore.outputs.cache-matched-key }}

@@ -25,13 +25,19 @@ inputs:
     description: Whether compatible workloads can seed misses.
   max-staleness-hours:
     description: Retention slack.
+  build-cache-backend:
+    description: Requested build cache backend.
 outputs:
   version:
     description: Resolved compiler.
+  backend:
+    description: Build cache backend in use.
   build:
     description: Build cache directory.
   modules:
     description: Module cache directory.
+  paths:
+    description: Directories in the GitHub cache archive.
   key:
     description: Fresh key.
   restore-keys:
