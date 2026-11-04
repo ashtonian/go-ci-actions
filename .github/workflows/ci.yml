@@ -9,6 +9,9 @@ permissions:
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
+defaults:
+  run:
+    shell: bash
 env:
   GOCACHE: ${{ github.workspace }}/.contract-build
   GOMODCACHE: ${{ github.workspace }}/.contract-modules
@@ -18,8 +21,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        os: ${{ fromJSON(vars.MACOS_CI == 'on' && '["arc-go-ci-actions","macos-latest"]' || '["arc-go-ci-actions"]') }}
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
@@ -40,7 +44,8 @@ jobs:
         run: go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
   seed:
     if: github.actor == 'ashtonian' && (github.event_name != 'pull_request' || github.event.pull_request.user.login == 'ashtonian')
-    runs-on: ubuntu-latest
+    runs-on: arc-go-ci-actions
+    timeout-minutes: 15
     outputs:
       key: ${{ steps.go.outputs.cache-primary-key }}
     steps:
@@ -51,6 +56,7 @@ jobs:
         id: go
         with:
           go-version: "1.26.9"
+          build-cache-backend: github
           cache-key-prefix: probe-${{ github.run_id }}-${{ github.run_attempt }}
       - run: |
           mkdir -p "$GOCACHE" "$GOMODCACHE"
@@ -61,7 +67,8 @@ jobs:
         working-directory: fixtures
   restore:
     needs: seed
-    runs-on: ubuntu-latest
+    runs-on: arc-go-ci-actions
+    timeout-minutes: 15
     outputs:
       key: ${{ steps.go.outputs.cache-primary-key }}
     steps:
@@ -72,6 +79,7 @@ jobs:
         id: go
         with:
           go-version: "1.26.9"
+          build-cache-backend: github
           cache-key-prefix: probe-${{ github.run_id }}-${{ github.run_attempt }}
           cache-mode: read-only
       - env:
@@ -84,7 +92,8 @@ jobs:
           echo reader > "$GOCACHE/reader-only"
   disabled:
     needs: seed
-    runs-on: ubuntu-latest
+    runs-on: arc-go-ci-actions
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
@@ -93,6 +102,7 @@ jobs:
         id: go
         with:
           go-version: "1.26.9"
+          build-cache-backend: github
           cache-key-prefix: probe-${{ github.run_id }}-${{ github.run_attempt }}
           cache-mode: off
       - env:
@@ -102,7 +112,8 @@ jobs:
           test ! -e "$GOCACHE/contract-sentinel"
   warm:
     needs: [seed, restore]
-    runs-on: ubuntu-latest
+    runs-on: arc-go-ci-actions
+    timeout-minutes: 15
     outputs:
       key: ${{ steps.go.outputs.cache-primary-key }}
     steps:
@@ -113,6 +124,7 @@ jobs:
         id: go
         with:
           go-version: "1.26.9"
+          build-cache-backend: github
           cache-key-prefix: probe-${{ github.run_id }}-${{ github.run_attempt }}
       - name: Assert read-write restore outputs
         env:
@@ -126,7 +138,8 @@ jobs:
   # gocacheprog on PATH. The stub plugin is never started.
   remote:
     if: github.actor == 'ashtonian' && (github.event_name != 'pull_request' || github.event.pull_request.user.login == 'ashtonian')
-    runs-on: ubuntu-latest
+    runs-on: arc-go-ci-actions
+    timeout-minutes: 15
     outputs:
       key: ${{ steps.go.outputs.cache-primary-key }}
     env:
@@ -157,9 +170,51 @@ jobs:
           case "$KEY" in remote-probe-*-mod-*) ;; *) echo "unexpected key $KEY"; exit 1 ;; esac
           mkdir -p "$GOMODCACHE"
           echo module > "$GOMODCACHE/remote-sentinel"
+  container:
+    if: github.actor == 'ashtonian' && (github.event_name != 'pull_request' || github.event.pull_request.user.login == 'ashtonian')
+    runs-on: arc-go-ci-actions
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      id-token: write
+    container:
+      image: mcr.microsoft.com/playwright:v1.59.1-noble@sha256:b0ab6f3cb99aa7803adbc14d9027ec1785fc6e433b97e134e0f8fe61683b6b53
+      options: --cpus=2
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - uses: ./
+        id: go
+        with:
+          go-version-file: fixtures/go.work
+          workload: container
+      - name: Exercise the mounted cache with cold and warm local state
+        working-directory: fixtures
+        env:
+          BACKEND: ${{ steps.go.outputs.build-cache-backend }}
+          GOCACHEPROG_LOG_LEVEL: info
+        run: |
+          test "$BACKEND" = remote
+          test -x "$GOCACHEPROG"
+          curl --fail --silent --show-error --max-time 10 "$GOCACHEPROG_REMOTE_URL/readyz" >/dev/null
+          GOCACHEPROG_DIR="$RUNNER_TEMP/cache-first" go test -count=1 ./... 2>&1 | tee "$RUNNER_TEMP/cache-first.log"
+          GOCACHEPROG_DIR="$RUNNER_TEMP/cache-second" go test -count=1 ./... 2>&1 | tee "$RUNNER_TEMP/cache-second.log"
+          node - "$RUNNER_TEMP/cache-first.log" "$RUNNER_TEMP/cache-second.log" <<'NODE'
+          const fs = require('node:fs');
+          const read = file => fs.readFileSync(file, 'utf8').split('\n').filter(l => l.startsWith('{'))
+            .map(l => JSON.parse(l)).filter(v => v.msg === 'go build cache summary');
+          const first = read(process.argv[2]), second = read(process.argv[3]);
+          if (!first.length || !second.length) throw new Error('cache summaries are missing');
+          for (const s of [...first, ...second]) {
+            if (s.remote_errors || s.remote_disabled || s.uploads_disabled) throw new Error('remote cache unavailable');
+          }
+          if (!second.some(s => s.remote_hits > 0)) throw new Error('fresh local cache did not reuse remote objects');
+          NODE
   failed:
     needs: seed
-    runs-on: ubuntu-latest
+    runs-on: arc-go-ci-actions
+    timeout-minutes: 15
     continue-on-error: true
     outputs:
       key: ${{ steps.go.outputs.cache-primary-key }}
@@ -171,6 +226,7 @@ jobs:
         id: go
         with:
           go-version: "1.26.9"
+          build-cache-backend: github
           cache-key-prefix: failed-probe-${{ github.run_id }}-${{ github.run_attempt }}
       - name: Intentional failure to verify post-save suppression
         run: |
@@ -179,8 +235,9 @@ jobs:
           exit 17
   verify:
     if: always() && !cancelled() && github.actor == 'ashtonian'
-    needs: [seed, restore, disabled, failed, smoke, warm, remote]
-    runs-on: ubuntu-latest
+    needs: [seed, restore, disabled, failed, smoke, warm, remote, container]
+    runs-on: arc-go-ci-actions
+    timeout-minutes: 15
     steps:
       - env:
           SEED: ${{ needs.seed.result }}
@@ -189,6 +246,7 @@ jobs:
           SMOKE: ${{ needs.smoke.result }}
           WARM: ${{ needs.warm.result }}
           REMOTE: ${{ needs.remote.result }}
+          CONTAINER: ${{ needs.container.result }}
           FAILED_KEY: ${{ needs.failed.outputs.key }}
           READER_KEY: ${{ needs.restore.outputs.key }}
         run: |
@@ -198,6 +256,7 @@ jobs:
           test "$SMOKE" = success
           test "$WARM" = success
           test "$REMOTE" = success
+          test "$CONTAINER" = success
           test -n "$FAILED_KEY"
           test -n "$READER_KEY"
       - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0

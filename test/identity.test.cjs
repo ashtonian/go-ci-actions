@@ -20,7 +20,7 @@ function readCommandFile(file) {
   return values;
 }
 
-function runIdentity(t, {remote, mode = 'read-write'}) {
+function runIdentity(t, {remote, mounted = false, mode = 'read-write'}) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'go-ci-identity-'));
   t.after(() => fs.rmSync(root, {recursive: true, force: true}));
   const bin = path.join(root, 'bin'), temp = path.join(root, 'temp');
@@ -35,11 +35,20 @@ function runIdentity(t, {remote, mode = 'read-write'}) {
   const env = {PATH: bin + path.delimiter + process.env.PATH, RUNNER_TEMP: temp,
     GITHUB_OUTPUT: path.join(root, 'output'), GITHUB_ENV: path.join(root, 'env'),
     ACTIONS_ID_TOKEN_REQUEST_URL: 'https://token'};
+  let mountedPlugin;
+  if (mounted) {
+    env.RUNNER_TOOL_CACHE = path.join(root, 'mounted-tools');
+    const bundle = path.join(env.RUNNER_TOOL_CACHE, 'go-ci-cache', 'v1');
+    fs.mkdirSync(bundle, {recursive: true});
+    mountedPlugin = path.join(bundle, 'gocacheprog');
+    fs.renameSync(path.join(bin, 'gocacheprog'), mountedPlugin);
+    fs.writeFileSync(path.join(bundle, 'config.json'), JSON.stringify({version: 1, remoteURL: 'http://cache:8080'}));
+  }
   if (remote) env.GOCACHEPROG_REMOTE_URL = 'http://127.0.0.1:9';
   for (const [name, value] of Object.entries(inputs)) env['INPUT_' + name.toUpperCase()] = value;
   const result = spawnSync(process.execPath, [path.join(__dirname, '../_identity/index.cjs')], {env, encoding: 'utf8'});
   assert.equal(result.status, 0, result.stderr);
-  return {result, bin, temp, build, modules,
+  return {result, bin, temp, build, modules, mountedPlugin,
     outputs: readCommandFile(env.GITHUB_OUTPUT), exported: readCommandFile(env.GITHUB_ENV)};
 }
 
@@ -51,6 +60,15 @@ test('packaged identity hands the build cache to the runner plugin', t => {
   assert.match(run.outputs.key, /^go-v1-mod-Linux-X64-[0-9a-f]{16}-abc123$/);
   assert.deepEqual(run.exported, {GOCACHEPROG: path.join(run.bin, 'gocacheprog'), GOCACHEPROG_DIR: run.outputs.build});
   assert.match(run.result.stdout, /build cache: remote/);
+});
+
+test('packaged identity finds the runner cache inside a job container mount', t => {
+  const run = runIdentity(t, {mounted: true});
+  assert.equal(run.outputs.backend, 'remote');
+  assert.equal(run.outputs.paths, run.modules);
+  assert.equal(run.exported.GOCACHEPROG, run.mountedPlugin);
+  assert.equal(run.exported.GOCACHEPROG_REMOTE_URL, 'http://cache:8080');
+  assert.equal(run.exported.GOCACHEPROG_DIR, path.join(run.temp, 'gocacheprog'));
 });
 
 test('packaged identity keeps the GitHub cache without a remote cache', t => {

@@ -86,6 +86,34 @@ test('invalid modes, injected key fields and retention values fail closed', () =
   assert.throws(() => identity({...values, 'dependency-hash': 'x\nkey=bad'}, 'go1.26.9'));
   assert.throws(() => identity({...values, backend: ''}, 'go1.26.9'));
 });
+test('mounted cache respects opt-out, endpoint overrides and invalid manifests', t => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'go-ci-mounted-'));
+  t.after(() => fs.rmSync(root, {recursive: true, force: true}));
+  const bundle = path.join(root, 'go-ci-cache', 'v1');
+  fs.mkdirSync(bundle, {recursive: true});
+  const manifest = path.join(bundle, 'config.json');
+  const plugin = path.join(bundle, 'gocacheprog');
+  const env = {RUNNER_TOOL_CACHE: root, RUNNER_TEMP: '/runner/temp', PATH: '/nonexistent'};
+  fs.writeFileSync(manifest, JSON.stringify({version: 1, remoteURL: 'https://cache.example/cache'}));
+  assert.equal(buildCache('auto', 'read-write', env).backend, 'github', 'missing helper falls back');
+  fs.writeFileSync(plugin, '#!/bin/sh\n', {mode: 0o755});
+  const readOnly = buildCache('auto', 'read-only', env);
+  assert.equal(readOnly.backend, 'remote');
+  assert.equal(readOnly.env.GOCACHEPROG_READ_ONLY, 'true');
+  assert.equal(readOnly.env.GOCACHEPROG_REMOTE_URL, 'https://cache.example/cache');
+  const override = buildCache('auto', 'read-write', {...env, GOCACHEPROG_REMOTE_URL: 'https://override.example'});
+  assert.equal(override.env.GOCACHEPROG, plugin);
+  assert.equal(override.env.GOCACHEPROG_REMOTE_URL, undefined, 'preserve explicit endpoint');
+  for (const content of ['{', 'null', JSON.stringify({version: 2, remoteURL: 'https://cache.example'}),
+    JSON.stringify({version: 1, remoteURL: 'file:///tmp/cache'}),
+    JSON.stringify({version: 1, remoteURL: 'https://user:password@cache.example'}),
+    JSON.stringify({version: 1, remoteURL: 'https://cache.example\n'})]) {
+    fs.writeFileSync(manifest, content);
+    assert.throws(() => buildCache('auto', 'read-write', env), /runner cache|Runner cache/);
+    assert.equal(buildCache('github', 'read-write', env).backend, 'github');
+    assert.equal(buildCache('auto', 'off', env).backend, 'off');
+  }
+});
 test('trim retains early-used objects in long jobs and skips symlinks', t => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'go-ci-trim-'));
   t.after(() => fs.rmSync(root, {recursive: true, force: true}));

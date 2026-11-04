@@ -24,6 +24,12 @@ the plugin, its endpoint and the write authorization; the action only
 detects them and exports the plugin variables. Modules stay in the GitHub
 cache, saved once per workload and manifest set.
 
+Container jobs discover a versioned runner-owned bundle through their tool-cache
+mount. It contains the executable and endpoint, which otherwise remain outside
+the container's filesystem/environment. Discovery does not install software,
+copy credentials or change cache authorization. A missing helper retains the
+existing archive fallback; invalid published configuration fails explicitly.
+
 The lifecycle hook is declared after actions/cache, so reverse post ordering
 prunes before upload. Its cutoff is relative to setup start, preserving objects
 used early in long jobs. Failed/cancelled jobs do not publish state; read-only
