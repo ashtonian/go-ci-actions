@@ -53,6 +53,20 @@ module cache. Without both signals, or with build-cache-backend github, build
 objects stay in the GitHub cache. A GOCACHEPROG inherited from the runner is
 cleared then, and in off mode, so each mode means what it says.
 
+Job containers can consume the same runner-owned setup through the mounted
+tool cache. Before accepting a job, the runner places a native executable at
+`$RUNNER_TOOL_CACHE/go-ci-cache/v1/gocacheprog` and writes `config.json` beside
+it with `{"version":1,"remoteURL":"https://cache.example"}`. Use a real copy
+of the executable: links into the host image do not resolve in a job container.
+The endpoint must be HTTP(S), without embedded credentials. The bundle contains
+no token; uploads still use the current job's OIDC authorization.
+
+Auto mode discovers this bundle when the environment/PATH contract is absent.
+An explicit endpoint takes precedence. A missing bundle or helper retains the
+GitHub backend; a malformed manifest fails setup. Explicit github/off modes
+ignore the bundle. The runner owns its contents and lifetime; the action does
+not download a helper or infer a site endpoint.
+
 | cache-mode | Plugin | GitHub cache (modules) |
 | --- | --- | --- |
 | read-write | Reads and uploads | Restores; saves on success |
@@ -81,9 +95,13 @@ This repository owns toolchain/cache policy. Consumers own build/test commands.
 Infrastructure owns runner admission, storage, limits and credentials.
 
 Run npm test with Node 24+ and actionlint. CI validates the packaged action on
-Linux/macOS, successful cross-job save/restore, matrix isolation, failed-job
+the in-cluster `arc-go-ci-actions` runners. Hosted macOS is opt-in through the
+repository variable `MACOS_CI=on`; it is excluded by default. The contracts cover
+successful cross-job save/restore, matrix isolation, failed-job
 save suppression, restore-only and disabled modes, and the remote backend's
-plugin environment and modules-only archive. Policy tests cover reruns,
+plugin environment and modules-only archive. A real job-container check uses
+Karsto's pinned Playwright runtime to verify remote object reuse from fresh
+local directories. Policy tests cover reruns,
 invalid inputs, safe pruning, long-running jobs and backend selection. No npm
 dependencies.
 
