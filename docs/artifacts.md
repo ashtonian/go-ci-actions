@@ -93,6 +93,11 @@ rerun selection. The `SeaweedFS artifact contract` workflow verifies two-job byt
 round trips against the actual gateway and denies cross-repository/run, root-list
 and anonymous requests. Native acceptance is required before consumer rollout.
 
+Consumers can call `.github/workflows/artifact-consumer.yml` with their runner
+label to check repository OIDC, endpoint configuration and an exact byte/layout
+round trip without running application suites. Trigger it when artifact workflow
+configuration changes; the shared native contract owns the full isolation tests.
+
 ## Operations
 
 Data keys are `data/<days>d/<repository-id>/<run-id>/<attempt>/<name-hash>/<sha>.zip`;

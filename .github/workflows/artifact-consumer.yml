@@ -1,0 +1,37 @@
+name: Artifact storage contract
+on:
+  workflow_call:
+    inputs:
+      runner:
+        description: Runner label used by the consuming repository
+        required: true
+        type: string
+permissions:
+  contents: read
+  id-token: write
+env:
+  CI_ARTIFACT_ENDPOINT: ${{ vars.CI_ARTIFACT_ENDPOINT }}
+jobs:
+  storage:
+    runs-on: ${{ inputs.runner }}
+    timeout-minutes: 5
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Prepare repository-bound fixture
+        run: |
+          mkdir -p "$RUNNER_TEMP/artifact-contract/in/nested"
+          printf '%s/%s/%s\n' "$GITHUB_REPOSITORY_ID" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" > "$RUNNER_TEMP/artifact-contract/in/nested/identity.txt"
+      - uses: ashtonian/go-ci-actions/upload-artifact@07fbac1477e5c6befebba17cb7326daff639ff25 # v1.3.0
+        with:
+          name: storage-contract
+          path: ${{ runner.temp }}/artifact-contract/in
+          retention-days: 1
+          if-no-files-found: error
+      - uses: ashtonian/go-ci-actions/download-artifact@07fbac1477e5c6befebba17cb7326daff639ff25 # v1.3.0
+        with:
+          name: storage-contract
+          path: ${{ runner.temp }}/artifact-contract/out
+      - name: Verify bytes and directory layout
+        run: cmp "$RUNNER_TEMP/artifact-contract/in/nested/identity.txt" "$RUNNER_TEMP/artifact-contract/out/nested/identity.txt"
