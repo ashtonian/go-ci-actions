@@ -1,0 +1,40 @@
+name: upload-artifact
+description: Upload immutable ZIP artifacts to SeaweedFS using GitHub OIDC.
+inputs:
+  endpoint:
+    description: "SeaweedFS artifact origin; normally supplied by vars.CI_ARTIFACT_ENDPOINT."
+    default: ""
+  bucket:
+    description: "Artifact bucket."
+    default: "ci-artifacts"
+  name:
+    description: "Artifact name, unique within this run attempt."
+    default: "artifact"
+  path:
+    description: "Files, directories, or newline-separated glob patterns."
+    default: ""
+  if-no-files-found:
+    description: "warn, error, or ignore."
+    default: "warn"
+  retention-days:
+    description: "Retention from 1 through 90 days; zero uses GITHUB_RETENTION_DAYS (90 if unset)."
+    default: "0"
+  compression-level:
+    description: "ZIP compression from 0 through 9."
+    default: "6"
+  overwrite:
+    description: "Replace this name only within the current run attempt."
+    default: "false"
+  include-hidden-files:
+    description: "Include hidden files; inspect them for secrets first."
+    default: "false"
+outputs:
+  artifact-id:
+    description: artifact-id.
+  artifact-digest:
+    description: artifact-digest.
+  artifact-url:
+    description: artifact-url.
+runs:
+  using: node24
+  main: index.cjs

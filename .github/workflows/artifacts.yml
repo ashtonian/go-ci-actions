@@ -1,0 +1,78 @@
+name: SeaweedFS artifact contract
+on:
+  push:
+    branches: [main]
+    paths: ["lib/artifact*", "*-artifact/**", "artifact-setup/**", "test/artifact*", ".github/workflows/artifacts.yml"]
+  pull_request:
+    paths: ["lib/artifact*", "*-artifact/**", "artifact-setup/**", "test/artifact*", ".github/workflows/artifacts.yml"]
+  workflow_dispatch:
+permissions:
+  contents: read
+  id-token: write
+concurrency:
+  group: artifacts-${{ github.ref }}
+  cancel-in-progress: true
+env:
+  CI_ARTIFACT_ENDPOINT: ${{ vars.CI_ARTIFACT_ENDPOINT }}
+jobs:
+  upload:
+    if: github.actor_id == '4212452' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+    runs-on: arc-go-ci-actions
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          persist-credentials: false
+      - name: Client contracts
+        run: python3 -m unittest discover -s test -p artifact_test.py
+      - name: Prepare native round trip
+        run: |
+          mkdir -p fixture/sub
+          printf 'exact artifact bytes\n' > fixture/sub/result.txt
+          printf 'do not upload\n' > fixture/.secret
+          printf 'exclude\n' > fixture/excluded.txt
+      - uses: ./upload-artifact
+        with:
+          name: round-trip
+          path: |
+            fixture/
+            !fixture/excluded.txt
+          retention-days: 1
+      - uses: ./upload-artifact
+        with:
+          name: second-result
+          path: fixture/sub/result.txt
+          retention-days: 7
+      - uses: ./artifact-setup
+      - name: Verify native isolation
+        run: python3 test/artifact-native.py
+  download:
+    needs: upload
+    runs-on: arc-go-ci-actions
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          persist-credentials: false
+      - uses: ./download-artifact
+        with:
+          name: round-trip
+          path: restored
+      - name: Check exact bytes and layout
+        run: |
+          test "$(cat restored/sub/result.txt)" = 'exact artifact bytes'
+          test ! -e restored/.secret
+          test ! -e restored/excluded.txt
+      - uses: ./download-artifact
+        with:
+          path: all-results
+      - name: Check multiple-artifact layout
+        run: |
+          cmp restored/sub/result.txt all-results/round-trip/sub/result.txt
+          cmp restored/sub/result.txt all-results/second-result/result.txt
+      - uses: ./download-artifact
+        with:
+          pattern: '*result'
+          merge-multiple: true
+          path: merged
+      - run: cmp restored/sub/result.txt merged/result.txt

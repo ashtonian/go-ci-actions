@@ -1,0 +1,33 @@
+name: download-artifact
+description: Download verified artifacts from SeaweedFS using GitHub OIDC.
+inputs:
+  endpoint:
+    description: "SeaweedFS artifact origin; normally supplied by vars.CI_ARTIFACT_ENDPOINT."
+    default: ""
+  bucket:
+    description: "Artifact bucket."
+    default: "ci-artifacts"
+  name:
+    description: "Exact name; omit to download all matching artifacts."
+    default: ""
+  path:
+    description: "Destination directory."
+    default: "."
+  pattern:
+    description: "Artifact-name glob; ignored names are not downloaded."
+    default: ""
+  merge-multiple:
+    description: "Extract matching archives into one directory."
+    default: "false"
+  run-id:
+    description: "Source run ID in the current repository; defaults to this run."
+    default: ""
+  run-attempt:
+    description: "Highest source attempt to consider; defaults to all attempts."
+    default: ""
+outputs:
+  download-path:
+    description: download-path.
+runs:
+  using: node24
+  main: index.cjs

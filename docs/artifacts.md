@@ -1,0 +1,141 @@
+# SeaweedFS workflow artifacts
+
+## Overview
+
+`upload-artifact`, `download-artifact` and `artifact-setup` store CI artifacts in
+SeaweedFS through its native GitHub OIDC bearer authentication. They do not use
+GitHub's artifact quota or put long-lived storage keys in a runner. ZIP payloads
+are immutable and content addressed; a manifest publishes a named artifact only
+after its payload upload completes. Downloads verify size and SHA-256 first.
+
+## Configuration
+
+| Input/environment | Default | Meaning |
+|---|---|---|
+| `endpoint` / `CI_ARTIFACT_ENDPOINT` | required | HTTPS gateway origin; HTTP is permitted only for a `.svc.cluster.local` service |
+| `bucket` / `CI_ARTIFACT_BUCKET` | `ci-artifacts` | Dedicated artifact bucket |
+| `name` | upload: `artifact`; download: all | Unique name within a run attempt; download selects an exact name |
+| upload `path` | required | File, directory, or newline-separated globs; `!` excludes matches |
+| download `path` | `.` | Destination directory |
+| `if-no-files-found` | `warn` | `warn`, `error`, or `ignore` |
+| `retention-days` | `0` | Integer 1–90; zero uses `GITHUB_RETENTION_DAYS`, capped at 90 (90 if unset) |
+| `compression-level` | `6` | ZIP compression level 0–9 |
+| `overwrite` | `false` | Replace a named manifest in this attempt only |
+| `include-hidden-files` | `false` | Include hidden files after inspecting their contents |
+| download `pattern` | none | Glob over artifact names |
+| `merge-multiple` | `false` | Extract multiple archives together instead of name subdirectories |
+| `run-id` | current run | Source run within the same repository |
+| `run-attempt` | all | Highest attempt to consider; latest artifact per name wins |
+| `GITHUB_REPOSITORY_ID`, `GITHUB_RUN_ID`, `GITHUB_RUN_ATTEMPT` | runner supplied | Numeric identity; must match the signed token |
+| `GITHUB_REPOSITORY`, `GITHUB_SHA` | runner supplied | Provenance recorded with the manifest |
+| `CI_ARTIFACT_TOOL` | exported by setup | Canonical Python CLI path for custom consumers |
+
+## Dependencies
+
+Python 3.11+ and the runner's Node 24 action runtime; no installed Python or npm
+packages. The gateway needs SeaweedFS's OIDC/IAM support, a dedicated bucket,
+claim-scoped policies and the retention paths described below. GitHub jobs need
+`permissions: {contents: read, id-token: write}`. Reusable workflow callers must
+grant that permission as well. Fork execution remains subject to repository
+admission policy; this action does not grant approval or expand repository trust.
+
+## Interfaces
+
+Pin all actions to a reviewed full commit SHA. Configure the repository variable
+`CI_ARTIFACT_ENDPOINT`, then supply it at workflow level:
+
+```yaml
+permissions:
+  contents: read
+  id-token: write
+env:
+  CI_ARTIFACT_ENDPOINT: ${{ vars.CI_ARTIFACT_ENDPOINT }}
+# In producer steps:
+# - uses: ashtonian/go-ci-actions/upload-artifact@<reviewed-commit>
+#   with:
+#     name: test-results
+#     path: reports/
+#     retention-days: 7
+# In a job that needs the producer:
+# - uses: ashtonian/go-ci-actions/download-artifact@<same-commit>
+#   with:
+#     name: test-results
+#     path: restored/
+```
+
+Upload outputs are `artifact-id` (manifest key), `artifact-digest` (SHA-256), and
+`artifact-url` (S3 URI). These are **not GitHub artifact IDs or browser download
+links**. The job summary records the URI, size, digest and retention. Download
+exports `download-path`. Release assets and GitHub Pages deployment artifacts
+have separate contracts and are not replaced by these actions.
+
+After `artifact-setup`, receipt consumers can use:
+
+```sh
+python3 "$CI_ARTIFACT_TOOL" list --run-id "$SOURCE_RUN_ID"
+python3 "$CI_ARTIFACT_TOOL" download --run-id "$SOURCE_RUN_ID" \
+  --name acceptance --path receipt.zip --archive --max-bytes 131072
+```
+
+`list` returns verified manifest identities. Consumers still verify the producing
+workflow, source/tree, run attempt and job conclusions through GitHub; possession
+of an archive does not prove a passing check. Existing historical GitHub receipts
+may use a read-only fallback until their original expiry. New writes have one
+backend. `gh run download` does not retrieve SeaweedFS artifacts. Outside Actions,
+operators use the deployment's authenticated S3 access and the summary's object
+URI; the workflow token itself is short lived and is never published.
+
+## Build, run and test
+
+`python3 -m unittest discover -s test -p artifact_test.py` checks path layout,
+hidden/excluded files, manifest identity, checksum rejection, safe extraction and
+rerun selection. The `SeaweedFS artifact contract` workflow verifies two-job byte
+round trips against the actual gateway and denies cross-repository/run, root-list
+and anonymous requests. Native acceptance is required before consumer rollout.
+
+## Operations
+
+Data keys are `data/<days>d/<repository-id>/<run-id>/<attempt>/<name-hash>/<sha>.zip`;
+manifests are `metadata/<repository-id>/<run-id>/<attempt>/<name-hash>.json`.
+Configure native filer TTLs on each `data/<1..90>d/` prefix and a 90-day TTL on
+`metadata/`. The manifest's expiry suppresses stale reads immediately; the volume
+server reclaims expired TTL volumes. Changing retention later cannot extend
+already-written objects. Aborted uploads or replaced manifests leave payloads
+that expire under their original TTL. Data here is disposable CI evidence, not a
+backup or permanent release store.
+
+HTTP operations use 120-second socket deadlines, at most three attempts with
+bounded backoff for transient errors, and a 15-minute action subprocess deadline.
+Transfers/extraction are capped at 50 GiB; document reads at 16 MiB and listings at
+10,000 manifests. A missing named artifact fails; an empty pattern/all listing
+succeeds with no files, matching aggregation of optional producers.
+
+A 403 indicates identity, policy, audience or endpoint configuration; do not
+retry it blindly. A 412 means a name collision unless the same immutable upload
+is being retried. Missing/expired evidence causes dependent checks to run, never
+to accept unproven results. SHA mismatch is fatal. A failed gateway fails artifact
+publication; there is no silent GitHub-storage fallback. Monitor gateway errors,
+object capacity, expiry, and the native contract workflow.
+
+## Security
+
+The gateway verifies issuer, signature, audience, expiry and owner policy. Reads
+are limited to the signed repository ID; writes to its signed run and attempt.
+No bearer credential follows redirects. The client checks matching local identity
+for configuration mistakes, but authorization belongs to the server. Do not use
+an endpoint controlled by an untrusted workflow contributor. Existing runner
+admission remains mandatory.
+
+Extraction rejects absolute/traversal paths, Windows drive/backslash paths,
+archive symlinks and existing destination symlinks escaping the output directory.
+Uploads omit symlink files and reject paths escaping their search root. ZIP
+layout preserves the least common search root. Directory metadata and executable
+permissions are not an artifact contract; archive a tarball when those matter.
+
+## Code map
+
+- `lib/artifact.py`: shared transport, manifests, archive rules and CLI.
+- `lib/artifact-entry.cjs`: bounded Python launch for Node actions.
+- `upload-artifact/`, `download-artifact/`, `artifact-setup/`: action interfaces.
+- `test/artifact_test.py`, `test/artifact-native.py`: contract and native checks.
+- `.github/workflows/artifacts.yml`: real gateway acceptance.
