@@ -144,3 +144,24 @@ permissions are not an artifact contract; archive a tarball when those matter.
 - `upload-artifact/`, `download-artifact/`, `artifact-setup/`: action interfaces.
 - `test/artifact_test.py`, `test/artifact-native.py`: contract and native checks.
 - `.github/workflows/artifacts.yml`: real gateway acceptance.
+
+## Docker build records
+
+Set `DOCKER_BUILD_RECORD_UPLOAD: "false"` in workflows using
+`docker/build-push-action` to stop its implicit GitHub artifact upload. After each
+build step, call `build-record` with `metadata: ${{ steps.build.outputs.metadata }}`
+and `if: always() && (steps.build.outcome == 'success' || steps.build.outcome == 'failure')`.
+It exports that exact reference with Buildx, then uploads through the same artifact
+client. Image publication, attestations, build caches and Docker job summaries are
+unchanged. Use the shared `download-artifact` action to retrieve the `.dockerbuild`
+file for import into Docker Desktop.
+
+The action requires Python 3.11+, Docker Buildx with `history export`, and the same
+OIDC/endpoint configuration as uploads. Inputs are `metadata` (required for an
+export), `name` (prefix, default `build-record`), `retention-days` (default 7), and
+`endpoint` (defaults to `CI_ARTIFACT_ENDPOINT`). The Buildx record ID is appended to
+the prefix so matrix jobs and multiple builds cannot overwrite one another. Export
+has a 120-second deadline. A build with no metadata warns and leaves its diagnostics
+in the original job log; it never substitutes another build's record. An export or
+storage failure fails the preservation step. The Docker record contract builds a
+minimal real image and compares the exported record with its downloaded bytes.

@@ -1,0 +1,51 @@
+name: Docker record contract
+on:
+  push:
+    branches: [main]
+    paths: ['build-record/**', '.github/workflows/build-record.yml']
+  pull_request:
+    paths: ['build-record/**', '.github/workflows/build-record.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+  id-token: write
+env:
+  CI_ARTIFACT_ENDPOINT: ${{ vars.CI_ARTIFACT_ENDPOINT }}
+  DOCKER_BUILD_RECORD_UPLOAD: "false"
+concurrency:
+  group: docker-record-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  record:
+    if: github.actor_id == '4212452' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+    runs-on: arc-go-ci-actions
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - name: Minimal real build
+        run: |
+          mkdir fixture
+          printf 'FROM scratch\nCOPY result.txt /result.txt\n' > fixture/Dockerfile
+          printf 'artifact record contract\n' > fixture/result.txt
+      - id: build
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: fixture
+      - uses: ./build-record
+        with:
+          metadata: ${{ steps.build.outputs.metadata }}
+          name: docker-record
+          retention-days: 1
+      - uses: ./download-artifact
+        with:
+          pattern: docker-record-*
+          merge-multiple: true
+          path: restored
+      - name: Compare exported and downloaded records
+        run: |
+          original=$(find "$RUNNER_TEMP" -path '*/build-record-*/build.dockerbuild' -type f -print -quit)
+          test -s "$original"
+          cmp "$original" restored/build.dockerbuild

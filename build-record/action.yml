@@ -1,0 +1,34 @@
+name: Preserve Docker build record
+description: Export a Buildx record and store it in SeaweedFS with GitHub OIDC.
+inputs:
+  metadata:
+    description: The metadata output of docker/build-push-action.
+    default: ""
+  name:
+    description: Artifact name prefix; the unique Buildx reference is appended.
+    default: build-record
+  retention-days:
+    description: Artifact retention, from 1 through 90 days.
+    default: "7"
+  endpoint:
+    description: SeaweedFS gateway origin; defaults to CI_ARTIFACT_ENDPOINT.
+    default: ""
+runs:
+  using: composite
+  steps:
+    - name: Export record
+      id: export
+      shell: bash
+      env:
+        BUILD_METADATA: ${{ inputs.metadata }}
+        RECORD_NAME: ${{ inputs.name }}
+      run: python3 "$GITHUB_ACTION_PATH/export.py"
+    - name: Store record
+      if: steps.export.outputs.path != ''
+      uses: ashtonian/go-ci-actions/upload-artifact@07fbac1477e5c6befebba17cb7326daff639ff25 # v1.3.0
+      with:
+        endpoint: ${{ inputs.endpoint }}
+        name: ${{ steps.export.outputs.name }}
+        path: ${{ steps.export.outputs.path }}
+        retention-days: ${{ inputs.retention-days }}
+        if-no-files-found: error
