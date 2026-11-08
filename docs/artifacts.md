@@ -18,7 +18,7 @@ after its payload upload completes. Downloads verify size and SHA-256 first.
 | upload `path` | required | File, directory, or newline-separated globs; `!` excludes matches |
 | download `path` | `.` | Destination directory |
 | `if-no-files-found` | `warn` | `warn`, `error`, or `ignore` |
-| `retention-days` | `30` | Integer 1–90; zero selects the default |
+| `retention-days` | `0` | Integer 1–90; zero uses `GITHUB_RETENTION_DAYS`, capped at 90 (90 if unset) |
 | `compression-level` | `6` | ZIP compression level 0–9 |
 | `overwrite` | `false` | Replace a named manifest in this attempt only |
 | `include-hidden-files` | `false` | Include hidden files after inspecting their contents |
@@ -74,7 +74,7 @@ After `artifact-setup`, receipt consumers can use:
 ```sh
 python3 "$CI_ARTIFACT_TOOL" list --run-id "$SOURCE_RUN_ID"
 python3 "$CI_ARTIFACT_TOOL" download --run-id "$SOURCE_RUN_ID" \
-  --name acceptance --path receipt.zip --archive
+  --name acceptance --path receipt.zip --archive --max-bytes 131072
 ```
 
 `list` returns verified manifest identities. Consumers still verify the producing

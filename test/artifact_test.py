@@ -80,7 +80,7 @@ class ArtifactTests(unittest.TestCase):
         class Store:
             def manifests(self, *_):
                 return [item]
-            def request(self, *_, target):
+            def request(self, *_, target, **kwargs):
                 target.write_bytes(b"corrupt")
         with tempfile.TemporaryDirectory() as directory:
             with self.assertRaisesRegex(ValueError, "SHA-256"):
@@ -100,6 +100,15 @@ class ArtifactTests(unittest.TestCase):
         store.request = lambda method, key="", **kwargs: (documents[key] if key else listing, {})
         self.assertEqual([(i["name"], i["run_attempt"]) for i in store.manifests()], [("build", "1"), ("test", "2")])
         self.assertEqual([(i["name"], i["run_attempt"]) for i in store.manifests(attempt="1")], [("build", "1"), ("test", "1")])
+
+    def test_download_refuses_oversized_manifest_before_transfer(self):
+        class Store:
+            def manifests(self, *_):
+                return [{"name": "receipt", "size": 129}]
+            def request(self, *_args, **_kwargs):
+                raise AssertionError("oversized artifact must not be transferred")
+        with self.assertRaisesRegex(ValueError, "byte limit"):
+            artifact.download(Store(), "unused", name="receipt", max_bytes=128)
 
     def test_no_plaintext_external_endpoint(self):
         with self.assertRaises(ValueError):

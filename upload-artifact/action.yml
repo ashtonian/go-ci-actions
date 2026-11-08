@@ -17,8 +17,8 @@ inputs:
     description: "warn, error, or ignore."
     default: "warn"
   retention-days:
-    description: "Retention from 1 through 90 days; zero selects 30."
-    default: "30"
+    description: "Retention from 1 through 90 days; zero uses GITHUB_RETENTION_DAYS (90 if unset)."
+    default: "0"
   compression-level:
     description: "ZIP compression from 0 through 9."
     default: "6"

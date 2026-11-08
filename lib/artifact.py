@@ -99,7 +99,7 @@ class Store:
         self.refresh_at = min(time.time() + 180, claims["exp"] - 30)
         return token
 
-    def request(self, method, key="", *, query=None, body=None, headers=None, target=None):
+    def request(self, method, key="", *, query=None, body=None, headers=None, target=None, max_bytes=MAX_EXTRACTED):
         url = self.endpoint + "/" + self.bucket + "/" + urllib.parse.quote(key, safe="/")
         if query:
             url += "?" + urllib.parse.urlencode(query)
@@ -119,8 +119,8 @@ class Store:
                             size = 0
                             while chunk := response.read(1024 * 1024):
                                 size += len(chunk)
-                                if size > MAX_EXTRACTED:
-                                    raise ValueError("artifact transfer exceeds 50 GiB")
+                                if size > max_bytes:
+                                    raise ValueError("artifact transfer exceeds its byte limit")
                                 dest.write(chunk)
                         return b"", dict(response.headers)
                     result = response.read(MAX_DOCUMENT + 1)
@@ -253,7 +253,7 @@ def sha256(path):
         return hashlib.file_digest(stream, "sha256").hexdigest()
 
 
-def upload(store, name, patterns, retention=30, hidden=False, compression=6, overwrite=False, missing="warn"):
+def upload(store, name, patterns, retention=90, hidden=False, compression=6, overwrite=False, missing="warn"):
     name_hash(name)
     if not 1 <= retention <= 90 or not 0 <= compression <= 9 or missing not in ("warn", "error", "ignore"):
         raise ValueError("invalid retention-days, compression-level, or if-no-files-found")
@@ -264,11 +264,15 @@ def upload(store, name, patterns, retention=30, hidden=False, compression=6, ove
         if missing == "warn":
             print("::warning::No files found for artifact", file=sys.stderr)
         return None
+    if sum(file.stat().st_size for file in files) > MAX_EXTRACTED:
+        raise ValueError("artifact contents exceed 50 GiB")
     with tempfile.TemporaryDirectory(prefix="ci-artifact-") as directory:
         archive = Path(directory) / "artifact.zip"
         with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED, compresslevel=compression, strict_timestamps=False) as target:
             for file in files:
                 target.write(file, file.relative_to(root).as_posix())
+        if archive.stat().st_size > MAX_EXTRACTED:
+            raise ValueError("artifact archive exceeds 50 GiB")
         digest = sha256(archive)
         item = {"version": 1, "name": name, "repository_id": store.repository_id,
                 "repository": os.environ.get("GITHUB_REPOSITORY", ""), "run_id": store.run_id,
@@ -315,7 +319,9 @@ def extract(archive, destination):
                     shutil.copyfileobj(src, dst, 1024 * 1024)
 
 
-def download(store, destination, name="", pattern="", run_id=None, attempt=None, merge=False, archive_only=False):
+def download(store, destination, name="", pattern="", run_id=None, attempt=None, merge=False, archive_only=False, max_bytes=MAX_EXTRACTED):
+    if not 0 < max_bytes <= MAX_EXTRACTED:
+        raise ValueError("download byte limit must be positive and at most 50 GiB")
     found = store.manifests(run_id, attempt)
     matches = [item for item in found if (not name or item["name"] == name) and (not pattern or fnmatch.fnmatchcase(item["name"], pattern))]
     if name and not matches:
@@ -323,9 +329,11 @@ def download(store, destination, name="", pattern="", run_id=None, attempt=None,
     if archive_only and len(matches) != 1:
         raise ValueError("archive download requires exactly one named artifact")
     for item in matches:
+        if item["size"] > max_bytes:
+            raise ValueError("artifact exceeds download byte limit")
         with tempfile.TemporaryDirectory(prefix="ci-artifact-") as directory:
             archive = Path(directory) / "artifact.zip"
-            store.request("GET", item["key"], target=archive)
+            store.request("GET", item["key"], target=archive, max_bytes=max_bytes)
             if archive.stat().st_size != item["size"] or sha256(archive) != item["sha256"]:
                 raise ValueError("artifact archive failed size/SHA-256 verification")
             if archive_only:
@@ -360,6 +368,7 @@ def main():
     parser.add_argument("--pattern", default="")
     parser.add_argument("--path", default=".")
     parser.add_argument("--archive", action="store_true")
+    parser.add_argument("--max-bytes", type=int, default=MAX_EXTRACTED)
     args = parser.parse_args()
     if args.command.startswith("action-") or args.command == "setup":
         setup()
@@ -367,7 +376,9 @@ def main():
         return
     store = Store()
     if args.command in ("upload", "action-upload"):
-        retention = int(input_value("retention-days", "30") or "30") or 30
+        retention = int(input_value("retention-days", "0") or "0")
+        if retention == 0:
+            retention = min(90, int(os.environ.get("GITHUB_RETENTION_DAYS", "90")))
         item = upload(store, input_value("name", args.name or "artifact"), input_value("path", args.path), retention,
                       boolean(input_value("include-hidden-files", "false")), int(input_value("compression-level", "6")),
                       boolean(input_value("overwrite", "false")), input_value("if-no-files-found", "warn"))
@@ -375,7 +386,7 @@ def main():
     elif args.command in ("download", "action-download"):
         download(store, input_value("path", args.path), input_value("name", args.name), input_value("pattern", args.pattern),
                  input_value("run-id", args.run_id), input_value("run-attempt", args.run_attempt),
-                 boolean(input_value("merge-multiple", "false")), args.archive)
+                 boolean(input_value("merge-multiple", "false")), args.archive, args.max_bytes)
     else:
         print(json.dumps(store.manifests(args.run_id, args.run_attempt)))
 

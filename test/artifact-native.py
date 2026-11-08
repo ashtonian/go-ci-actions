@@ -10,6 +10,9 @@ a = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(a)
 s = a.Store()
 probes = [
+    ('write an unretained path', 'PUT', f'data/999d/{s.repository_id}/{s.run_id}/{s.attempt}/probe.zip', None),
+    ('write another attempt', 'PUT', f'metadata/{s.repository_id}/{s.run_id}/999/probe.json', None),
+    ('delete an object', 'DELETE', f'metadata/{s.repository_id}/{s.run_id}/{s.attempt}/probe.json', None),
     ('write another repository', 'PUT', f'metadata/1/{s.run_id}/{s.attempt}/probe.json', None),
     ('write another run', 'PUT', f'metadata/{s.repository_id}/1/{s.attempt}/probe.json', None),
     ('read another repository', 'GET', 'metadata/1/1/1/probe.json', None),
