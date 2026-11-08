@@ -1,0 +1,12 @@
+name: artifact-setup
+description: Expose the shared artifact CLI for workflow receipt consumers.
+inputs:
+  endpoint:
+    description: "SeaweedFS artifact origin; normally supplied by vars.CI_ARTIFACT_ENDPOINT."
+    default: ""
+  bucket:
+    description: "Artifact bucket."
+    default: "ci-artifacts"
+runs:
+  using: node24
+  main: index.cjs

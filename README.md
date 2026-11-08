@@ -112,3 +112,8 @@ changes; do not infer a speedup from unrelated repositories.
 
 The fresh job-isolated cache approach is described in
 [CloudX's article](https://www.cloudx.ai/posts/setup-go).
+
+## Workflow artifacts
+
+The shared [SeaweedFS artifact actions](docs/artifacts.md) provide upload, download
+and receipt-consumer tooling with native GitHub OIDC and per-run write scope.
