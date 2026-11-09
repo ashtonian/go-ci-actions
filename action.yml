@@ -35,6 +35,9 @@ inputs:
   build-cache-backend:
     description: "auto uses the runner's remote build cache when it provides one; github keeps build objects in the GitHub cache."
     default: auto
+  module-proxy:
+    description: "auto puts the runner's Go module proxy first in GOPROXY when it provides a ready one, and keeps modules out of the GitHub cache; off archives modules."
+    default: auto
 outputs:
   go-version:
     description: Version installed by setup-go.
@@ -45,8 +48,11 @@ outputs:
   build-cache-backend:
     description: "Where build objects live: github, remote, or off."
     value: ${{ steps.identity.outputs.backend }}
+  module-proxy:
+    description: The runner module proxy in use, or empty when modules download as the job configures them.
+    value: ${{ steps.identity.outputs.module-proxy }}
   cache-primary-key:
-    description: Key this job saves under; fresh per run unless the build cache is remote.
+    description: Key this job saves under; fresh per run unless the build cache is remote, and empty when nothing is archived.
     value: ${{ steps.identity.outputs.key }}
   cache-matched-key:
     description: Restored key or empty on a miss.
@@ -80,8 +86,9 @@ runs:
         seed-from-other-workloads: ${{ inputs.seed-from-other-workloads }}
         max-staleness-hours: ${{ inputs.max-staleness-hours }}
         build-cache-backend: ${{ inputs.build-cache-backend }}
+        module-proxy: ${{ inputs.module-proxy }}
     - name: Restore Go cache
-      if: inputs.cache-mode != 'off'
+      if: inputs.cache-mode != 'off' && steps.identity.outputs.paths != ''
       id: restore
       uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       with:
@@ -89,7 +96,7 @@ runs:
         key: ${{ steps.identity.outputs.key }}
         restore-keys: ${{ steps.identity.outputs.restore-keys }}
     - name: Register successful post-save without downloading again
-      if: inputs.cache-mode == 'read-write' && steps.restore.outputs.cache-hit != 'true'
+      if: inputs.cache-mode == 'read-write' && steps.identity.outputs.paths != '' && steps.restore.outputs.cache-hit != 'true'
       uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       with:
         path: ${{ steps.identity.outputs.paths }}
@@ -105,4 +112,5 @@ runs:
         max-staleness-hours: ${{ inputs.max-staleness-hours }}
         cache-mode: ${{ inputs.cache-mode }}
         backend: ${{ steps.identity.outputs.backend }}
+        module-proxy: ${{ steps.identity.outputs.module-proxy }}
         matched-key: ${{ steps.restore.outputs.cache-matched-key }}

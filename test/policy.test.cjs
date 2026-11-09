@@ -4,12 +4,12 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
-const {buildCache, identity, hours, validatePaths} = require('../lib/policy.cjs');
+const {archivePaths, buildCache, identity, hours, moduleProxy, validatePaths} = require('../lib/policy.cjs');
 const {trim, measure} = require('../lib/cache.cjs');
 const values = {workflow: 'CI', job: 'test', workload: '{"race":true}',
   'dependency-hash': 'abc123', os: 'Linux', arch: 'X64', 'run-id': '123', 'run-attempt': '1',
   'cache-mode': 'read-write', 'cache-key-prefix': 'go-v1',
-  'seed-from-other-workloads': 'true', 'max-staleness-hours': '2', backend: 'github'};
+  'seed-from-other-workloads': 'true', 'max-staleness-hours': '2', backend: 'github', modules: 'archive'};
 test('workloads, compilers, manifests and reruns have separate save keys', () => {
   const original = identity(values, 'go1.26.9').key;
   for (const field of ['workflow', 'job', 'workload', 'os', 'arch', 'run-id', 'run-attempt']) {
@@ -43,6 +43,63 @@ test('remote backend archives modules once per workload and manifest set', () =>
   assert.ok(result.key.startsWith(prefixes[0]));
   assert.equal(prefixes[1], 'go-v1-mod-Linux-X64-');
   assert.equal(identity({...remote, 'seed-from-other-workloads': 'false'}, 'go1.26.9')['restore-keys'], prefixes[0]);
+});
+test('a module proxy takes modules out of every archive', () => {
+  assert.deepEqual(identity({...values, backend: 'remote', modules: 'proxy'}, 'go1.26.9'), {key: '', 'restore-keys': ''});
+  const buildOnly = identity({...values, modules: 'proxy'}, 'go1.26.9');
+  assert.match(buildOnly.key, /^go-v1-build-Linux-X64-go1\.26\.9-[0-9a-f]{16}-abc123-123-1$/);
+  for (const prefix of buildOnly['restore-keys'].split('\n')) {
+    assert.ok(prefix.startsWith('go-v1-build-'), 'never restores an archive that carries modules: ' + prefix);
+  }
+  assert.notEqual(buildOnly.key, identity(values, 'go1.26.9').key);
+  assert.throws(() => identity({...values, modules: ''}, 'go1.26.9'), /module source/);
+  const cases = [
+    ['github', 'archive', '/b\n/m'], ['github', 'proxy', '/b'], ['remote', 'archive', '/m'], ['remote', 'proxy', ''],
+  ];
+  for (const [backend, modules, want] of cases) assert.equal(archivePaths(backend, modules, '/b', '/m'), want, backend + '/' + modules);
+});
+test('the runner module proxy goes first only when ready and the job has no GOPROXY', async t => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'go-ci-proxy-'));
+  t.after(() => fs.rmSync(root, {recursive: true, force: true}));
+  const bundle = path.join(root, 'go-ci-cache', 'v1');
+  fs.mkdirSync(bundle, {recursive: true});
+  fs.writeFileSync(path.join(bundle, 'config.json'),
+    JSON.stringify({version: 1, moduleProxyURL: 'http://bundle-proxy:3000'}));
+  const ready = async () => ({ready: true});
+  const fallback = 'https://proxy.golang.org,direct';
+  const cases = [
+    {name: 'environment', env: {GO_MODULE_PROXY_URL: 'http://proxy:3000'},
+      want: {url: 'http://proxy:3000', env: {GOPROXY: 'http://proxy:3000|' + fallback}, notices: []}},
+    {name: 'bundle', env: {RUNNER_TOOL_CACHE: root},
+      want: {url: 'http://bundle-proxy:3000', env: {GOPROXY: 'http://bundle-proxy:3000|' + fallback}, notices: []}},
+    {name: 'environment over bundle', env: {RUNNER_TOOL_CACHE: root, GO_MODULE_PROXY_URL: 'http://proxy:3000'},
+      want: {url: 'http://proxy:3000', env: {GOPROXY: 'http://proxy:3000|' + fallback}, notices: []}},
+    {name: 'job list kept behind the proxy', env: {GO_MODULE_PROXY_URL: 'http://proxy:3000'}, goProxy: 'https://mirror.example',
+      want: {url: 'http://proxy:3000', env: {GOPROXY: 'http://proxy:3000|https://mirror.example'}, notices: []}},
+    {name: 'job sets GOPROXY', env: {GO_MODULE_PROXY_URL: 'http://proxy:3000', GOPROXY: 'off'},
+      want: {url: '', env: {}, notices: []}},
+    {name: 'GOENV forbids downloads', env: {GO_MODULE_PROXY_URL: 'http://proxy:3000'}, goProxy: 'off',
+      want: {url: '', env: {}, notices: []}},
+    {name: 'no proxy', env: {}, want: {url: '', env: {}, notices: []}},
+    {name: 'opted out', requested: 'off', env: {GO_MODULE_PROXY_URL: 'http://proxy:3000'},
+      want: {url: '', env: {}, notices: []}},
+  ];
+  for (const c of cases) {
+    assert.deepEqual(await moduleProxy(c.requested || 'auto', c.env, c.goProxy || fallback, ready), c.want, c.name);
+  }
+  const down = await moduleProxy('auto', {GO_MODULE_PROXY_URL: 'http://proxy:3000'}, fallback,
+    async () => ({ready: false, reason: 'ECONNREFUSED'}));
+  assert.equal(down.url, '');
+  assert.deepEqual(down.env, {});
+  assert.match(down.notices[0], /http:\/\/proxy:3000 is not ready \(ECONNREFUSED\)/);
+  for (const url of ['http://a:1,http://b:2', 'http://a:1|direct', 'file:///tmp', 'http://user:pw@proxy', 'http://proxy\n']) {
+    await assert.rejects(moduleProxy('auto', {GO_MODULE_PROXY_URL: url}, fallback, ready), /GO_MODULE_PROXY_URL/, url);
+  }
+  await assert.rejects(moduleProxy('on', {}, fallback, ready), /auto or off/);
+  fs.writeFileSync(path.join(bundle, 'config.json'), JSON.stringify({version: 1, moduleProxyURL: 'http://a,b'}));
+  await assert.rejects(moduleProxy('auto', {RUNNER_TOOL_CACHE: root}, fallback, ready), /moduleProxyURL/);
+  assert.deepEqual(await moduleProxy('off', {RUNNER_TOOL_CACHE: root}, fallback, ready), {url: '', env: {}, notices: []},
+    'off never reads the bundle');
 });
 test('build cache backend follows what the runner provides', t => {
   const bin = fs.mkdtempSync(path.join(os.tmpdir(), 'go-ci-bin-'));
@@ -104,10 +161,14 @@ test('mounted cache respects opt-out, endpoint overrides and invalid manifests',
   const override = buildCache('auto', 'read-write', {...env, GOCACHEPROG_REMOTE_URL: 'https://override.example'});
   assert.equal(override.env.GOCACHEPROG, plugin);
   assert.equal(override.env.GOCACHEPROG_REMOTE_URL, undefined, 'preserve explicit endpoint');
+  fs.writeFileSync(manifest, JSON.stringify({version: 1, moduleProxyURL: 'http://proxy:3000'}));
+  assert.equal(buildCache('auto', 'read-write', env).backend, 'github', 'a proxy-only bundle provides no build cache');
   for (const content of ['{', 'null', JSON.stringify({version: 2, remoteURL: 'https://cache.example'}),
     JSON.stringify({version: 1, remoteURL: 'file:///tmp/cache'}),
     JSON.stringify({version: 1, remoteURL: 'https://user:password@cache.example'}),
-    JSON.stringify({version: 1, remoteURL: 'https://cache.example\n'})]) {
+    JSON.stringify({version: 1, remoteURL: 'https://cache.example\n'}),
+    JSON.stringify({version: 1, remoteURL: 42}),
+    JSON.stringify({version: 1, remoteURL: 'https://cache.example', moduleProxyURL: 'ftp://proxy'})]) {
     fs.writeFileSync(manifest, content);
     assert.throws(() => buildCache('auto', 'read-write', env), /runner cache|Runner cache/);
     assert.equal(buildCache('github', 'read-write', env).backend, 'github');

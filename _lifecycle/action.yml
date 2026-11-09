@@ -13,6 +13,8 @@ inputs:
     description: Cache mode.
   backend:
     description: Build cache backend in use.
+  module-proxy:
+    description: Runner module proxy in use, or empty.
   matched-key:
     description: Restored key.
 runs:

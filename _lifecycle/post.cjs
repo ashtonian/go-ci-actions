@@ -13,15 +13,17 @@ try {
   const build = state['cache-mode'] === 'read-write' && state.backend === 'github'
     ? trim(state.build, cutoff) : {...measure(state.build), removedBytes: 0, removedFiles: 0};
   const modules = measure(state.modules);
-  const metrics = {mode: state['cache-mode'], backend: state.backend, restored: Boolean(state['matched-key']),
+  const metrics = {mode: state['cache-mode'], backend: state.backend,
+    moduleSource: state['module-proxy'] ? 'proxy' : 'archive', restored: Boolean(state['matched-key']),
     buildBytes: build.bytes, moduleBytes: modules.bytes,
     removedBytes: build.removedBytes, removedFiles: build.removedFiles, maintenanceMs: Date.now() - began};
   console.log('Go cache metrics: ' + JSON.stringify(metrics));
   if (process.env.GITHUB_STEP_SUMMARY) {
     const mib = value => (value / 1048576).toFixed(1) + ' MiB';
     fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY,
-      '\n### Go cache\n\n| Mode | Build cache | Restored | Build | Modules | Trimmed | Maintenance |\n' +
-      '| --- | --- | --- | --- | --- | --- | --- |\n| ' + metrics.mode + ' | ' + metrics.backend + ' | ' + metrics.restored +
+      '\n### Go cache\n\n| Mode | Build cache | Modules from | Restored | Build | Modules | Trimmed | Maintenance |\n' +
+      '| --- | --- | --- | --- | --- | --- | --- | --- |\n| ' + metrics.mode + ' | ' + metrics.backend + ' | ' +
+      metrics.moduleSource + ' | ' + metrics.restored +
       ' | ' + mib(metrics.buildBytes) + ' | ' + mib(metrics.moduleBytes) + ' | ' +
       mib(metrics.removedBytes) + ' | ' + metrics.maintenanceMs + ' ms |\n');
   }

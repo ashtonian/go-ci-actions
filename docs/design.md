@@ -24,8 +24,20 @@ the plugin, its endpoint and the write authorization; the action only
 detects them and exports the plugin variables. Modules stay in the GitHub
 cache, saved once per workload and manifest set.
 
+The module proxy mode exists because the remote backend's module archives
+became the eviction. On 2026-11-09 Karsto's cache held 13.6 GB against the
+10 GB limit, 11.3 GB of it in eleven per-workload module archives of about
+1 GB, each restored whole by every Go job in 17-35 seconds. Archive sharing
+cannot be fixed in keys alone (#6): a partial first writer seeds every later
+job, and container and host archives extract to different roots. Modules are
+immutable and content-addressed, which is what a module proxy serves: a job
+fetches only the modules it uses, from the runner's network, and nothing is
+archived. The runner owns the proxy, its upstream and its trust; the action
+only detects it, checks that it answers, and puts it in front of the job's own
+GOPROXY so that any failure falls through.
+
 Container jobs discover a versioned runner-owned bundle through their tool-cache
-mount. It contains the executable and endpoint, which otherwise remain outside
+mount. It contains the executable and endpoints, which otherwise remain outside
 the container's filesystem/environment. Discovery does not install software,
 copy credentials or change cache authorization. A missing helper retains the
 existing archive fallback; invalid published configuration fails explicitly.

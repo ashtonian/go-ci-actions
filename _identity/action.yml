@@ -27,6 +27,8 @@ inputs:
     description: Retention slack.
   build-cache-backend:
     description: Requested build cache backend.
+  module-proxy:
+    description: Requested module proxy use.
 outputs:
   version:
     description: Resolved compiler.
@@ -37,7 +39,9 @@ outputs:
   modules:
     description: Module cache directory.
   paths:
-    description: Directories in the GitHub cache archive.
+    description: Directories in the GitHub cache archive; empty when nothing is archived.
+  module-proxy:
+    description: Runner module proxy in use, or empty.
   key:
     description: Fresh key.
   restore-keys:
