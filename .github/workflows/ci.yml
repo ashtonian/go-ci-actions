@@ -259,6 +259,18 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: Drop tool-cache links the job container cannot follow
+        run: |
+          # Baked-tool links point outside the job-container mounts. Remove
+          # only inaccessible links so setup actions can populate RAM scratch.
+          for cache_dir in "${RUNNER_TOOL_CACHE:?}" /__w/_tool; do
+            [ -d "$cache_dir" ] || continue
+            for tool in "$cache_dir"/* "$cache_dir"/*/*; do
+              if [ -L "$tool" ] && [ ! -e "$tool" ]; then
+                unlink "$tool"
+              fi
+            done
+          done
       - uses: ./
         id: go
         with:
