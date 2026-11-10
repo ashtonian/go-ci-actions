@@ -111,8 +111,14 @@ backup or permanent release store.
 
 Gateway requests use 120-second socket deadlines and the GitHub OIDC token
 request a 30-second one. Each gateway request, including the token request in
-front of it, gets at most three attempts with bounded backoff (1 s, 2 s) for
-transient errors: 429, 5xx, timeouts and connection failures. The action
+front of it, gets at most six attempts for transient errors (429, 500, 502,
+503, 504, timeouts and connection failures), waiting 1, 2, 4, 8 and 16 s
+between them, or the server's `Retry-After` when that is longer, up to 30 s.
+GitHub's token service answers 503 for many seconds at a time; `@actions/core`
+retries it ten times. Each retried failure logs a line naming the request
+(`artifact: GitHub OIDC token request failed (HTTP 503); attempt 1 of 6,
+retrying in 1 s`), and a final failure names the host that answered, so a
+token-service outage reads differently from a gateway one. The action
 subprocess has a 15-minute deadline.
 Transfers/extraction are capped at 50 GiB; document reads at 16 MiB and listings at
 10,000 manifests. A missing named artifact fails; an empty pattern/all listing

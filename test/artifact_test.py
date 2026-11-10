@@ -118,7 +118,7 @@ class ArtifactTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             artifact.Store("http://artifacts.example.test")
 
-    def test_token_request_failures(self):
+    def test_transient_failures_are_retried_within_the_budget(self):
         claims = {"repository_id": "1", "run_id": "2", "run_attempt": "3", "aud": artifact.AUDIENCE,
                   "exp": time.time() + 600}
         token = "h." + base64.urlsafe_b64encode(json.dumps(claims).encode()).decode().rstrip("=") + ".s"
@@ -126,40 +126,56 @@ class ArtifactTests(unittest.TestCase):
                "GITHUB_RUN_ID": "2", "GITHUB_RUN_ATTEMPT": "3",
                "ACTIONS_ID_TOKEN_REQUEST_URL": "https://token.example.test/?api-version=2.0",
                "ACTIONS_ID_TOKEN_REQUEST_TOKEN": "request-token"}
+        token_host, gateway_host = "token.example.test", "artifacts.example.test"
 
         class Response(io.BytesIO):
             headers = {}
 
         class Opener:
-            """Fails the first token request with `code`, then answers normally."""
-            def __init__(self, code):
-                self.code, self.calls = code, []
+            """Fails the first `failures` requests to `host` with `code`, then answers normally."""
+            def __init__(self, host, failures, code, headers):
+                self.host, self.failures, self.code, self.headers, self.calls = host, failures, code, headers, []
 
             def open(self, req, timeout):
-                self.calls.append(req.full_url.split("/")[2])
-                if len(self.calls) == 1:
-                    raise urllib.error.HTTPError(req.full_url, self.code, "error", {}, None)
-                if req.full_url.startswith("https://token.example.test/"):
+                host = req.full_url.split("/")[2]
+                self.calls.append(host)
+                if host == self.host and self.calls.count(host) <= self.failures:
+                    raise urllib.error.HTTPError(req.full_url, self.code, "error", self.headers, None)
+                if host == token_host:
                     return Response(json.dumps({"value": token}).encode())
                 return Response(b"{}")
 
         tests = [
-            {"name": "transient token error is retried", "code": 503,
-             "calls": ["token.example.test", "token.example.test", "artifacts.example.test"]},
-            {"name": "permission error is not retried", "code": 403, "calls": ["token.example.test"]},
+            {"name": "transient token error", "host": token_host, "failures": 1, "code": 503, "headers": {},
+             "calls": [token_host, token_host, gateway_host], "sleeps": [1], "logged": "GitHub OIDC token request"},
+            {"name": "Retry-After is honoured", "host": token_host, "failures": 1, "code": 503,
+             "headers": {"Retry-After": "7"}, "calls": [token_host, token_host, gateway_host], "sleeps": [7],
+             "logged": "GitHub OIDC token request"},
+            {"name": "Retry-After is capped", "host": token_host, "failures": 1, "code": 429,
+             "headers": {"Retry-After": "3600"}, "calls": [token_host, token_host, gateway_host], "sleeps": [30],
+             "logged": "GitHub OIDC token request"},
+            {"name": "transient gateway error", "host": gateway_host, "failures": 2, "code": 502, "headers": {},
+             "calls": [token_host, gateway_host, gateway_host, gateway_host], "sleeps": [1, 2],
+             "logged": "GET ci-artifacts/metadata/x.json"},
+            {"name": "outage longer than the budget", "host": token_host, "failures": 6, "code": 503, "headers": {},
+             "calls": [token_host] * 6, "sleeps": [1, 2, 4, 8, 16], "raises": True,
+             "logged": "attempt 5 of 6, retrying in 16 s"},
+            {"name": "permission error is not retried", "host": token_host, "failures": 1, "code": 403, "headers": {},
+             "calls": [token_host], "sleeps": [], "raises": True, "logged": ""},
         ]
         for tt in tests:
-            with self.subTest(tt["name"]), patch.dict(os.environ, env), patch.object(artifact.time, "sleep"), \
-                    patch("sys.stderr", io.StringIO()):
+            with self.subTest(tt["name"]), patch.dict(os.environ, env), \
+                    patch.object(artifact.time, "sleep") as sleep, patch("sys.stderr", io.StringIO()) as stderr:
                 store = artifact.Store()
-                store.opener = Opener(tt["code"])
-                if tt["code"] == 403:
+                store.opener = Opener(tt["host"], tt["failures"], tt["code"], tt["headers"])
+                if tt.get("raises"):
                     with self.assertRaises(urllib.error.HTTPError):
                         store.request("GET", "metadata/x.json")
                 else:
                     self.assertEqual(store.request("GET", "metadata/x.json")[0], b"{}")
                 self.assertEqual(store.opener.calls, tt["calls"])
-
+                self.assertEqual([c.args[0] for c in sleep.call_args_list], tt["sleeps"])
+                self.assertIn(tt["logged"], stderr.getvalue())
 
 if __name__ == "__main__":
     unittest.main()

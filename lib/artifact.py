@@ -25,6 +25,11 @@ import zipfile
 MAX_DOCUMENT = 16 * 1024 * 1024
 MAX_EXTRACTED = 50 * 1024**3
 AUDIENCE = "ci-artifacts"
+# GitHub's OIDC token service answers 503 for many seconds at a time, and
+# @actions/core retries it ten times. Six attempts wait up to 31 s in all.
+RETRY_DELAYS = (1, 2, 4, 8, 16)
+RETRY_STATUS = (429, 500, 502, 503, 504)
+MAX_RETRY_AFTER = 30
 
 
 def positive(value, label):
@@ -54,6 +59,14 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         # An authentication credential must never follow an endpoint redirect.
         return None
+
+
+def retry_delay(headers, default):
+    """The server's Retry-After in whole seconds, capped, when it asks for longer than default."""
+    value = (headers or {}).get("Retry-After", "")
+    if not str(value).isdigit():
+        return default
+    return max(default, min(int(value), MAX_RETRY_AFTER))
 
 
 class Store:
@@ -103,12 +116,15 @@ class Store:
         url = self.endpoint + "/" + self.bucket + "/" + urllib.parse.quote(key, safe="/")
         if query:
             url += "?" + urllib.parse.urlencode(query)
-        for attempt in range(3):
+        attempts = len(RETRY_DELAYS) + 1
+        for attempt in range(attempts):
             stream = None
+            operation = "GitHub OIDC token request"
             try:
-                # Inside the try: the OIDC token request is a remote call with the
-                # same transient failures (GitHub answers 503 at times).
+                # Inside the try: the token request fails transiently like the
+                # gateway does, and shares its retries.
                 auth = {"Authorization": "Bearer " + self.credential(), **(headers or {})}
+                operation = f"{method} {self.bucket}/{key}"
                 data = body
                 if isinstance(body, Path):
                     stream = body.open("rb")
@@ -130,15 +146,19 @@ class Store:
                         raise ValueError("artifact response exceeds document limit")
                     return result, dict(response.headers)
             except urllib.error.HTTPError as exc:
-                if exc.code not in (429, 500, 502, 503, 504) or attempt == 2:
+                if exc.code not in RETRY_STATUS or attempt == attempts - 1:
                     raise
-            except (TimeoutError, urllib.error.URLError, ConnectionError):
-                if attempt == 2:
+                failure, delay = f"HTTP {exc.code}", retry_delay(exc.headers, RETRY_DELAYS[attempt])
+            except (TimeoutError, urllib.error.URLError, ConnectionError) as exc:
+                if attempt == attempts - 1:
                     raise
+                failure, delay = getattr(exc, "reason", None) or exc, RETRY_DELAYS[attempt]
             finally:
                 if stream:
                     stream.close()
-            time.sleep(2**attempt)
+            print(f"artifact: {operation} failed ({failure}); attempt {attempt + 1} of {attempts}, "
+                  f"retrying in {delay} s", file=sys.stderr)
+            time.sleep(delay)
         raise RuntimeError("artifact request exhausted retries")
 
     def put(self, key, content, digest, overwrite=False):
@@ -397,7 +417,8 @@ if __name__ == "__main__":
     try:
         main()
     except urllib.error.HTTPError as exc:
-        print(f"artifact request failed: HTTP {exc.code} ({exc.reason})", file=sys.stderr)
+        host = urllib.parse.urlsplit(exc.url or "").hostname or "an unknown host"
+        print(f"artifact request failed: HTTP {exc.code} ({exc.reason}) from {host}", file=sys.stderr)
         sys.exit(1)
     except (ValueError, OSError, KeyError, zipfile.BadZipFile) as exc:
         print(f"artifact operation failed: {exc}", file=sys.stderr)
