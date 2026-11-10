@@ -109,8 +109,11 @@ already-written objects. Aborted uploads or replaced manifests leave payloads
 that expire under their original TTL. Data here is disposable CI evidence, not a
 backup or permanent release store.
 
-HTTP operations use 120-second socket deadlines, at most three attempts with
-bounded backoff for transient errors, and a 15-minute action subprocess deadline.
+Gateway requests use 120-second socket deadlines and the GitHub OIDC token
+request a 30-second one. Each gateway request, including the token request in
+front of it, gets at most three attempts with bounded backoff (1 s, 2 s) for
+transient errors: 429, 5xx, timeouts and connection failures. The action
+subprocess has a 15-minute deadline.
 Transfers/extraction are capped at 50 GiB; document reads at 16 MiB and listings at
 10,000 manifests. A missing named artifact fails; an empty pattern/all listing
 succeeds with no files, matching aggregation of optional producers.

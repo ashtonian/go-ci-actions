@@ -1,10 +1,14 @@
+import base64
 import importlib.util
+import io
 import json
 import os
 from pathlib import Path
 import tempfile
+import time
 import unittest
 from unittest.mock import patch
+import urllib.error
 import zipfile
 
 spec = importlib.util.spec_from_file_location("artifact", Path(__file__).parents[1] / "lib/artifact.py")
@@ -113,6 +117,48 @@ class ArtifactTests(unittest.TestCase):
     def test_no_plaintext_external_endpoint(self):
         with self.assertRaises(ValueError):
             artifact.Store("http://artifacts.example.test")
+
+    def test_token_request_failures(self):
+        claims = {"repository_id": "1", "run_id": "2", "run_attempt": "3", "aud": artifact.AUDIENCE,
+                  "exp": time.time() + 600}
+        token = "h." + base64.urlsafe_b64encode(json.dumps(claims).encode()).decode().rstrip("=") + ".s"
+        env = {"CI_ARTIFACT_ENDPOINT": "https://artifacts.example.test", "GITHUB_REPOSITORY_ID": "1",
+               "GITHUB_RUN_ID": "2", "GITHUB_RUN_ATTEMPT": "3",
+               "ACTIONS_ID_TOKEN_REQUEST_URL": "https://token.example.test/?api-version=2.0",
+               "ACTIONS_ID_TOKEN_REQUEST_TOKEN": "request-token"}
+
+        class Response(io.BytesIO):
+            headers = {}
+
+        class Opener:
+            """Fails the first token request with `code`, then answers normally."""
+            def __init__(self, code):
+                self.code, self.calls = code, []
+
+            def open(self, req, timeout):
+                self.calls.append(req.full_url.split("/")[2])
+                if len(self.calls) == 1:
+                    raise urllib.error.HTTPError(req.full_url, self.code, "error", {}, None)
+                if req.full_url.startswith("https://token.example.test/"):
+                    return Response(json.dumps({"value": token}).encode())
+                return Response(b"{}")
+
+        tests = [
+            {"name": "transient token error is retried", "code": 503,
+             "calls": ["token.example.test", "token.example.test", "artifacts.example.test"]},
+            {"name": "permission error is not retried", "code": 403, "calls": ["token.example.test"]},
+        ]
+        for tt in tests:
+            with self.subTest(tt["name"]), patch.dict(os.environ, env), patch.object(artifact.time, "sleep"), \
+                    patch("sys.stderr", io.StringIO()):
+                store = artifact.Store()
+                store.opener = Opener(tt["code"])
+                if tt["code"] == 403:
+                    with self.assertRaises(urllib.error.HTTPError):
+                        store.request("GET", "metadata/x.json")
+                else:
+                    self.assertEqual(store.request("GET", "metadata/x.json")[0], b"{}")
+                self.assertEqual(store.opener.calls, tt["calls"])
 
 
 if __name__ == "__main__":
