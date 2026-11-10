@@ -104,9 +104,11 @@ class Store:
         if query:
             url += "?" + urllib.parse.urlencode(query)
         for attempt in range(3):
-            auth = {"Authorization": "Bearer " + self.credential(), **(headers or {})}
             stream = None
             try:
+                # Inside the try: the OIDC token request is a remote call with the
+                # same transient failures (GitHub answers 503 at times).
+                auth = {"Authorization": "Bearer " + self.credential(), **(headers or {})}
                 data = body
                 if isinstance(body, Path):
                     stream = body.open("rb")
