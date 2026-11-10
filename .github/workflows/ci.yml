@@ -25,10 +25,10 @@ jobs:
     runs-on: ${{ matrix.os }}
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: "24"
       - run: npm test
@@ -49,13 +49,13 @@ jobs:
     outputs:
       key: ${{ steps.go.outputs.cache-primary-key }}
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - uses: ./
         id: go
         with:
-          go-version: "1.26.9"
+          go-version: "1.26.10"
           build-cache-backend: github
           module-proxy: "off"
           cache-key-prefix: probe-${{ github.run_id }}-${{ github.run_attempt }}
@@ -73,13 +73,13 @@ jobs:
     outputs:
       key: ${{ steps.go.outputs.cache-primary-key }}
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - uses: ./
         id: go
         with:
-          go-version: "1.26.9"
+          go-version: "1.26.10"
           build-cache-backend: github
           module-proxy: "off"
           cache-key-prefix: probe-${{ github.run_id }}-${{ github.run_attempt }}
@@ -97,13 +97,13 @@ jobs:
     runs-on: arc-go-ci-actions
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - uses: ./
         id: go
         with:
-          go-version: "1.26.9"
+          go-version: "1.26.10"
           build-cache-backend: github
           module-proxy: "off"
           cache-key-prefix: probe-${{ github.run_id }}-${{ github.run_attempt }}
@@ -120,13 +120,13 @@ jobs:
     outputs:
       key: ${{ steps.go.outputs.cache-primary-key }}
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - uses: ./
         id: go
         with:
-          go-version: "1.26.9"
+          go-version: "1.26.10"
           build-cache-backend: github
           module-proxy: "off"
           cache-key-prefix: probe-${{ github.run_id }}-${{ github.run_attempt }}
@@ -149,7 +149,7 @@ jobs:
     env:
       GOCACHEPROG_REMOTE_URL: http://127.0.0.1:9
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - name: Install a stub plugin
@@ -161,7 +161,7 @@ jobs:
       - uses: ./
         id: go
         with:
-          go-version: "1.26.9"
+          go-version: "1.26.10"
           module-proxy: "off"
           cache-key-prefix: remote-probe-${{ github.run_id }}-${{ github.run_attempt }}
       - name: Assert the plugin owns the build cache
@@ -186,7 +186,7 @@ jobs:
     env:
       GO_MODULE_PROXY_URL: http://127.0.0.1:18080
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - name: Start a module proxy stub that answers /readyz
@@ -205,7 +205,7 @@ jobs:
       - uses: ./
         id: go
         with:
-          go-version: "1.26.9"
+          go-version: "1.26.10"
           build-cache-backend: github
           cache-key-prefix: proxy-probe-${{ github.run_id }}-${{ github.run_attempt }}
       - name: Assert the proxy serves modules and the archive holds build objects
@@ -227,13 +227,13 @@ jobs:
     env:
       GO_MODULE_PROXY_URL: http://127.0.0.1:9
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - uses: ./
         id: go
         with:
-          go-version: "1.26.9"
+          go-version: "1.26.10"
           build-cache-backend: github
           cache-key-prefix: proxy-down-probe-${{ github.run_id }}-${{ github.run_attempt }}
           cache-mode: "off"
@@ -256,7 +256,7 @@ jobs:
       image: mcr.microsoft.com/playwright:v1.59.1-noble@sha256:b0ab6f3cb99aa7803adbc14d9027ec1785fc6e433b97e134e0f8fe61683b6b53
       options: --cpus=2
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - uses: ./
@@ -305,13 +305,13 @@ jobs:
     outputs:
       key: ${{ steps.go.outputs.cache-primary-key }}
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - uses: ./
         id: go
         with:
-          go-version: "1.26.9"
+          go-version: "1.26.10"
           build-cache-backend: github
           module-proxy: "off"
           cache-key-prefix: failed-probe-${{ github.run_id }}-${{ github.run_attempt }}
