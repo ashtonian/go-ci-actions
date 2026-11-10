@@ -58,8 +58,8 @@ Job containers can consume the same runner-owned setup through the mounted
 tool cache. Before accepting a job, the runner places a native executable at
 `$RUNNER_TOOL_CACHE/go-ci-cache/v1/gocacheprog` and writes `config.json` beside
 it with
-`{"version":1,"remoteURL":"https://cache.example","moduleProxyURL":"http://proxy.example:3000"}`;
-both endpoints are optional (see Module proxy). Use a real copy of the
+`{"version":1,"remoteURL":"https://cache.example","moduleProxyURL":"http://proxy.example:3000","npmRegistryURL":"http://npm.example:4873"}`;
+every endpoint is optional (see Module proxy and npm registry cache). Use a real copy of the
 executable: links into the host image do not resolve in a job container.
 Endpoints must be HTTP(S), without embedded credentials, a fragment, commas or
 pipes. The bundle contains no token; uploads still use the current job's OIDC
@@ -126,6 +126,41 @@ The go-v1 namespace and workload digest preserve existing local-helper warm
 caches. Empty manifest sets are supported for scaffold-generation jobs.
 Cache paths must not contain credentials.
 
+## npm registry cache
+
+`ashtonian/go-ci-actions/npm-registry@FULL_COMMIT_SHA` points pnpm, npm and
+Corepack at a registry cache the self-hosted runner provides (any npm registry
+server, such as Verdaccio). The runner sets NPM_REGISTRY_CACHE_URL, or
+`npmRegistryURL` in the bundle for job containers; the variable wins. Run it
+before installing the package manager and before any install step:
+
+```yaml
+- uses: ashtonian/go-ci-actions/npm-registry@FULL_COMMIT_SHA
+- uses: pnpm/action-setup@<sha>
+- run: pnpm install --frozen-lockfile
+```
+
+With mode auto (the default) the action asks the cache for `/-/ping`, which
+must answer 200 within 3 seconds, and on success exports
+
+```text
+pnpm_config_registry=<cache>/
+npm_config_registry=<cache>/
+COREPACK_NPM_REGISTRY=<cache>
+```
+
+pnpm 11 and later read `pnpm_config_*` and ignore `npm_config_*`, so both are
+set. Neither client falls back to a second registry within a run, which is why
+only a cache that answers is used: one that does not leaves the job on the
+registry it already configures, with a notice naming the cache and the failure.
+The action changes nothing when the job's environment already names a registry
+in any of those variables (either case), with mode off, or when the runner
+provides no cache. Scoped registries and credentials in `.npmrc` keep applying.
+Lockfiles are unaffected: they record integrity hashes, which the client checks
+whichever registry served the tarball. A malformed endpoint fails the step.
+
+Output: `registry` (the cache URL in use, or empty).
+
 ## Ownership and validation
 
 This repository owns toolchain/cache policy. Consumers own build/test commands.
@@ -141,8 +176,8 @@ build-only archive, and the fallback when the proxy does not answer. A real
 job-container check uses Karsto's pinned Playwright runtime to verify remote
 object reuse from fresh local directories, and that a module proxy the runner
 bundle declares is the one in use. Policy tests cover reruns,
-invalid inputs, safe pruning, long-running jobs and backend selection. No npm
-dependencies.
+invalid inputs, safe pruning, long-running jobs, backend selection, and the npm
+registry cache's selection, precedence and health paths. No npm dependencies.
 
 Release signed commits with immutable version tags. Upgrade consumers through
 reviewed SHA changes and roll back to the previous SHA. Measure cold, warm,

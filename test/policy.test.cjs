@@ -4,7 +4,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
-const {archivePaths, buildCache, identity, hours, moduleProxy, validatePaths} = require('../lib/policy.cjs');
+const {archivePaths, buildCache, identity, hours, moduleProxy, npmRegistry, validatePaths} = require('../lib/policy.cjs');
 const {trim, measure} = require('../lib/cache.cjs');
 const values = {workflow: 'CI', job: 'test', workload: '{"race":true}',
   'dependency-hash': 'abc123', os: 'Linux', arch: 'X64', 'run-id': '123', 'run-attempt': '1',
@@ -100,6 +100,60 @@ test('the runner module proxy goes first only when ready and the job has no GOPR
   await assert.rejects(moduleProxy('auto', {RUNNER_TOOL_CACHE: root}, fallback, ready), /moduleProxyURL/);
   assert.deepEqual(await moduleProxy('off', {RUNNER_TOOL_CACHE: root}, fallback, ready), {url: '', env: {}, notices: []},
     'off never reads the bundle');
+});
+test('the runner npm registry cache is used only when ready and the job names no registry', async t => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'go-ci-npm-'));
+  t.after(() => fs.rmSync(root, {recursive: true, force: true}));
+  const bundle = path.join(root, 'go-ci-cache', 'v1');
+  fs.mkdirSync(bundle, {recursive: true});
+  fs.writeFileSync(path.join(bundle, 'config.json'),
+    JSON.stringify({version: 1, npmRegistryURL: 'http://bundle-npm:4873'}));
+  const ready = async () => ({ready: true});
+  const using = url => ({
+    url: url + '/',
+    env: {pnpm_config_registry: url + '/', npm_config_registry: url + '/', COREPACK_NPM_REGISTRY: url},
+    notices: []
+  });
+  const none = {url: '', env: {}, notices: []};
+  const cases = [
+    {name: 'environment', env: {NPM_REGISTRY_CACHE_URL: 'http://npm:4873'}, want: using('http://npm:4873')},
+    {name: 'trailing slash', env: {NPM_REGISTRY_CACHE_URL: 'http://npm:4873/'}, want: using('http://npm:4873')},
+    {name: 'bundle', env: {RUNNER_TOOL_CACHE: root}, want: using('http://bundle-npm:4873')},
+    {name: 'environment over bundle', env: {RUNNER_TOOL_CACHE: root, NPM_REGISTRY_CACHE_URL: 'http://npm:4873'},
+      want: using('http://npm:4873')},
+    {name: 'job sets pnpm registry', env: {NPM_REGISTRY_CACHE_URL: 'http://npm:4873', pnpm_config_registry: 'https://r.example/'},
+      want: none},
+    {name: 'job sets npm registry', env: {NPM_REGISTRY_CACHE_URL: 'http://npm:4873', NPM_CONFIG_REGISTRY: 'https://r.example/'},
+      want: none},
+    {name: 'job sets Corepack registry', env: {NPM_REGISTRY_CACHE_URL: 'http://npm:4873', COREPACK_NPM_REGISTRY: 'https://r.example'},
+      want: none},
+    {name: 'no cache', env: {}, want: none},
+    {name: 'opted out', requested: 'off', env: {NPM_REGISTRY_CACHE_URL: 'http://npm:4873'}, want: none},
+  ];
+  for (const c of cases) assert.deepEqual(await npmRegistry(c.requested || 'auto', c.env, ready), c.want, c.name);
+  const down = await npmRegistry('auto', {NPM_REGISTRY_CACHE_URL: 'http://npm:4873'},
+    async () => ({ready: false, reason: 'ECONNREFUSED'}));
+  assert.deepEqual(down.env, {});
+  assert.equal(down.url, '');
+  assert.match(down.notices[0], /http:\/\/npm:4873 is not ready \(ECONNREFUSED\)/);
+  for (const url of ['http://a:1,http://b:2', 'file:///tmp', 'http://user:pw@npm', 'http://npm\n']) {
+    await assert.rejects(npmRegistry('auto', {NPM_REGISTRY_CACHE_URL: url}, ready), /NPM_REGISTRY_CACHE_URL/, url);
+  }
+  await assert.rejects(npmRegistry('on', {}, ready), /auto or off/);
+  fs.writeFileSync(path.join(bundle, 'config.json'), JSON.stringify({version: 1, npmRegistryURL: 'ftp://npm'}));
+  await assert.rejects(npmRegistry('auto', {RUNNER_TOOL_CACHE: root}, ready), /npmRegistryURL/);
+  assert.deepEqual(await npmRegistry('off', {RUNNER_TOOL_CACHE: root}, ready), none, 'off never reads the bundle');
+});
+test('the npm registry probe asks /-/ping and the module proxy probe /readyz', async t => {
+  const http = require('node:http');
+  const seen = [];
+  const server = http.createServer((request, response) => { seen.push(request.url); response.end('{}'); });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  t.after(() => server.close());
+  const url = 'http://127.0.0.1:' + server.address().port;
+  assert.equal((await npmRegistry('auto', {NPM_REGISTRY_CACHE_URL: url + '/'})).url, url + '/');
+  assert.equal((await moduleProxy('auto', {GO_MODULE_PROXY_URL: url}, 'https://proxy.golang.org,direct')).url, url);
+  assert.deepEqual(seen, ['/-/ping', '/readyz']);
 });
 test('build cache backend follows what the runner provides', t => {
   const bin = fs.mkdtempSync(path.join(os.tmpdir(), 'go-ci-bin-'));

@@ -36,6 +36,13 @@ archived. The runner owns the proxy, its upstream and its trust; the action
 only detects it, checks that it answers, and puts it in front of the job's own
 GOPROXY so that any failure falls through.
 
+The npm registry action applies the same contract to pnpm and npm. Lockfiles
+pin package integrity, not the registry, so a pull-through registry changes
+only where tarballs come from. The runner owns the registry and publishes its
+URL; the action checks `/-/ping`, and exports the registry variables only when
+the cache answers and the job sets no registry of its own. A cache outage
+leaves installs on the registry the job configures.
+
 Container jobs discover a versioned runner-owned bundle through their tool-cache
 mount. It contains the executable and endpoints, which otherwise remain outside
 the container's filesystem/environment. Discovery does not install software,
