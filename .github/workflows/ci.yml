@@ -245,6 +245,71 @@ jobs:
           test -z "$MODULE_PROXY"
           test -z "${GOPROXY:-}"
           case "$KEY" in *-build-*) echo "unexpected key $KEY"; exit 1 ;; esac
+  # The npm registry cache is used only when it answers and the job names no
+  # registry of its own; otherwise installs use the registry as configured.
+  npm-registry:
+    if: github.actor == 'ashtonian' && (github.event_name != 'pull_request' || github.event.pull_request.user.login == 'ashtonian')
+    runs-on: arc-go-ci-actions
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Start a registry stub that answers /-/ping
+        run: |
+          mkdir -p "$RUNNER_TEMP/registry-stub/-"
+          touch "$RUNNER_TEMP/registry-stub/-/ping"
+          python3 -m http.server 18081 --bind 127.0.0.1 --directory "$RUNNER_TEMP/registry-stub" >/dev/null 2>&1 &
+          for _ in $(seq 50); do
+            if curl --fail --silent --max-time 1 http://127.0.0.1:18081/-/ping; then
+              exit 0
+            fi
+            sleep 0.2
+          done
+          echo "registry stub did not start" >&2
+          exit 1
+      - uses: ./npm-registry
+        id: ready
+        env:
+          NPM_REGISTRY_CACHE_URL: http://127.0.0.1:18081
+      - name: Assert pnpm, npm and Corepack use the ready cache
+        env:
+          REGISTRY: ${{ steps.ready.outputs.registry }}
+        run: |
+          test "$REGISTRY" = "http://127.0.0.1:18081/"
+          test "$pnpm_config_registry" = "$REGISTRY"
+          test "$npm_config_registry" = "$REGISTRY"
+          test "$COREPACK_NPM_REGISTRY" = "http://127.0.0.1:18081"
+      - uses: ./npm-registry
+        id: down
+        env:
+          NPM_REGISTRY_CACHE_URL: http://127.0.0.1:9
+          pnpm_config_registry: ""
+          npm_config_registry: ""
+          COREPACK_NPM_REGISTRY: ""
+      - uses: ./npm-registry
+        id: named
+        env:
+          NPM_REGISTRY_CACHE_URL: http://127.0.0.1:18081
+          pnpm_config_registry: https://registry.npmjs.org/
+      - uses: ./npm-registry
+        id: off
+        with:
+          mode: "off"
+        env:
+          NPM_REGISTRY_CACHE_URL: http://127.0.0.1:18081
+          pnpm_config_registry: ""
+          npm_config_registry: ""
+          COREPACK_NPM_REGISTRY: ""
+      - name: Assert an unready cache, a job registry and off mode leave the registry alone
+        env:
+          DOWN: ${{ steps.down.outputs.registry }}
+          NAMED: ${{ steps.named.outputs.registry }}
+          OFF: ${{ steps.off.outputs.registry }}
+        run: |
+          test -z "$DOWN"
+          test -z "$NAMED"
+          test -z "$OFF"
   container:
     if: github.actor == 'ashtonian' && (github.event_name != 'pull_request' || github.event.pull_request.user.login == 'ashtonian')
     runs-on: arc-go-ci-actions

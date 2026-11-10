@@ -1,0 +1,12 @@
+name: npm-registry
+description: Point pnpm, npm and Corepack at the runner's npm registry cache when it answers.
+inputs:
+  mode:
+    description: "auto uses the runner's npm registry cache when it answers /-/ping; off leaves the job's registry as configured."
+    default: "auto"
+outputs:
+  registry:
+    description: "The registry cache URL the job now uses, or empty."
+runs:
+  using: node24
+  main: index.cjs
