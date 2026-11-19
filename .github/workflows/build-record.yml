@@ -39,6 +39,24 @@ jobs:
           metadata: ${{ steps.build.outputs.metadata }}
           name: docker-record
           retention-days: 1
+      - id: large
+        name: Metadata past one environment string's limit
+        env:
+          BUILD_REF: ${{ fromJSON(steps.build.outputs.metadata)['buildx.build.ref'] }}
+        run: |
+          python3 - <<'EOF'
+          import json
+          import os
+
+          metadata = {"buildx.build.ref": os.environ["BUILD_REF"], "padding": "x" * 200_000}
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+              output.write("metadata<<METADATA_EOF\n" + json.dumps(metadata) + "\nMETADATA_EOF\n")
+          EOF
+      - uses: ./build-record
+        with:
+          metadata: ${{ steps.large.outputs.metadata }}
+          name: large-metadata-record
+          retention-days: 1
       - uses: ./download-artifact
         with:
           pattern: docker-record-*

@@ -20,7 +20,10 @@ runs:
       id: export
       shell: bash
       env:
-        BUILD_METADATA: ${{ inputs.metadata }}
+        # Only the reference reaches the script. The metadata carries the
+        # build's provenance, a copy of the event payload per platform,
+        # which can pass the 128 KiB one environment string may hold.
+        BUILD_REF: ${{ fromJSON(inputs.metadata || '{}')['buildx.build.ref'] || '' }}
         RECORD_NAME: ${{ inputs.name }}
       run: python3 "$GITHUB_ACTION_PATH/export.py"
     - name: Store record
