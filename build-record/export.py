@@ -1,6 +1,5 @@
 """Export the exact Buildx result; never substitute an unrelated previous build."""
 
-import json
 import os
 from pathlib import Path
 import re
@@ -9,8 +8,7 @@ import tempfile
 
 
 def main():
-    metadata = json.loads(os.environ.get("BUILD_METADATA") or "{}")
-    ref = metadata.get("buildx.build.ref", "")
+    ref = os.environ.get("BUILD_REF", "")
     if not ref:
         print("::warning::Build produced no exportable reference; diagnostics remain in the job log.")
         return

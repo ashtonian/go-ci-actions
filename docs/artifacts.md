@@ -168,9 +168,13 @@ file for import into Docker Desktop.
 The action requires Python 3.11+, Docker Buildx with `history export`, and the same
 OIDC/endpoint configuration as uploads. Inputs are `metadata` (required for an
 export), `name` (prefix, default `build-record`), `retention-days` (default 7), and
-`endpoint` (defaults to `CI_ARTIFACT_ENDPOINT`). The Buildx record ID is appended to
+`endpoint` (defaults to `CI_ARTIFACT_ENDPOINT`). Only the metadata's Buildx reference
+reaches the export script, so metadata of any size is accepted: its provenance
+carries a copy of the event payload for each platform, which can exceed the 128 KiB
+one environment string may hold. The Buildx record ID is appended to
 the prefix so matrix jobs and multiple builds cannot overwrite one another. Export
 has a 120-second deadline. A build with no metadata warns and leaves its diagnostics
 in the original job log; it never substitutes another build's record. An export or
 storage failure fails the preservation step. The Docker record contract builds a
-minimal real image and compares the exported record with its downloaded bytes.
+minimal real image and compares the exported record with its downloaded bytes, and
+exports it again from metadata larger than one environment string may hold.
