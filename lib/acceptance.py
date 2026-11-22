@@ -350,6 +350,10 @@ def verify(env, api=None, receipts=fetch_receipt, now=time.time):
             else recorded.get("sha") == head
         if not validated:
             differs.append("head")
+        # A dispatch can narrow its jobs through inputs no scope sees, so its
+        # receipt is evidence only through the selections it recorded.
+        if run["event"] == "workflow_dispatch" and selections is None:
+            return Verdict(False, "a dispatched run's receipt is reused only against selections: every check runs", green_base)
         if differs:
             return Verdict(False, "the receipt does not match this push (" + ", ".join(differs) + "): every check runs", green_base)
         passed, skipped = receipt.get("passed"), receipt.get("skipped")

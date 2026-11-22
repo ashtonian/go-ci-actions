@@ -418,6 +418,28 @@ class AcceptanceTests(unittest.TestCase):
         self.assertFalse(reused, reason)
         self.assertIn("head", reason)
 
+    def test_a_dispatched_receipt_covers_only_what_it_recorded(self):
+        dispatched = self.run_record(event="workflow_dispatch", head_branch="feature")
+        results = json.dumps({"go": {"result": "success"}})
+        # record stores the caller's selections, never one derived from the event.
+        with patch.dict(os.environ, {"INPUT_RESULTS": results, "INPUT_SELECTIONS": json.dumps({"go": ["a"]})}):
+            narrowed = self.dispatch_receipt()
+        self.assertEqual(narrowed["selections"], {"go": ["a"]})
+        with patch.dict(os.environ, {"INPUT_RESULTS": results, "INPUT_SELECTIONS": ""}):
+            unrecorded = self.dispatch_receipt()
+        self.assertIsNone(unrecorded["selections"])
+        cases = {
+            # A fast-runner dispatch checked a; the push needs a and b.
+            "a narrowed dispatch against a wider push": (narrowed, json.dumps({"go": ["a", "b"]}), False),
+            "a narrowed dispatch against the same selection": (narrowed, json.dumps({"go": ["a"]}), True),
+            "a dispatch that recorded no selections": (unrecorded, json.dumps({"go": ["a"]}), False),
+            "a push that compares no selections": (narrowed, "", False),
+        }
+        for name, (receipt, needed, expected) in cases.items():
+            with self.subTest(name), patch.dict(os.environ, {"INPUT_REQUIRED": '["go"]', "INPUT_SELECTIONS": needed}):
+                (reused, reason), _ = self.verify(runs=[dispatched], receipt=receipt)
+                self.assertEqual(reused, expected, reason)
+
     def test_a_dispatch_records_only_a_branch_head(self):
         with self.assertRaises(ValueError):
             self.dispatch_receipt(ref="refs/tags/v1")

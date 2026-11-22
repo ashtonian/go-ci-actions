@@ -11,6 +11,9 @@ with the tag as a comment (`@<sha> # vX.Y.Z`).
   own run cannot start under an owner-only actor policy, is validated that
   way. verify considers the latest pull_request or workflow_dispatch run for
   the merge's second parent; a pull request receipt must still be the merge.
+  record stores the selections it is given, never "all" for the event, so a
+  dispatch narrowed by its inputs records what it ran; a dispatched receipt
+  is reused only against `selections`, and one with none covers nothing.
 
 ## v1.11.0
 

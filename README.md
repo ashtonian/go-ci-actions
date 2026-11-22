@@ -596,7 +596,14 @@ same workflow file over it again repeats work whose result is known.
   run is how a pull request whose own run cannot start (a bot's, under an
   owner-only actor policy) gets validated; its receipt serves the merge when
   the merge has the head's tree, as it does when the branch contains the
-  default branch. It stores a receipt,
+  default branch. record stores the `selections` it is given, for a dispatch
+  exactly as for a pull request, and never derives one from the event. The
+  scope selects every job on a dispatch and says `"all"`, but a dispatch whose
+  inputs narrow its jobs (an `if:` on an input, a reduced matrix, a
+  fast-runner mode) ran less: pass record the reduced selection of each such
+  job, or skip record on those dispatches. A dispatched receipt is reused
+  only by a verify given `selections`, and one that recorded none covers
+  nothing. It stores a receipt,
   `acceptance.json`, as the run's `acceptance` artifact in SeaweedFS
   (seven-day retention): the repository, workflow file, run ID and attempt,
   the event, the validated commit's SHA, parents and tree, a SHA-256 of the repository
