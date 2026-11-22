@@ -52,6 +52,9 @@ test('names cover their matrix variants only', () => {
   assert.ok(matches(job('conformance (emqx-ws)', 'success'), ['conformance']));
   assert.ok(!matches(job('conformance-extra', 'success'), ['conformance']));
   assert.ok(matches(job('stress', 'success'), ['fuzz', 'stress']));
+  assert.ok(matches(job('ci / test (ubuntu-latest)', 'success'), ['ci']), 'a reusable-workflow call covers its jobs');
+  assert.ok(matches(job('ci / test (ubuntu-latest)', 'success'), ['ci / test']));
+  assert.ok(!matches(job('cio / test', 'success'), ['ci']));
 });
 
 test('the workflow file and lookback are validated', () => {
