@@ -54,6 +54,7 @@ jobs:
         with:
           mode: verify
           required: ${{ steps.scope.outputs.jobs }}
+          base: ${{ steps.scope.outputs.base }}
           variables: ${{ toJSON(vars) }}
   smoke:
     needs: scope

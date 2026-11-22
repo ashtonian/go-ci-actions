@@ -79,6 +79,8 @@ class AcceptanceTests(unittest.TestCase):
         self.addCleanup(os.chdir, cwd)
         self.inputs = {"INPUT_VARIABLES": json.dumps({"MACOS_CI": "off"}), "INPUT_WORKFLOW": "", "INPUT_NAME": "",
                        "INPUT_RESULTS": json.dumps({"lint": {"result": "success"}, "test": {"result": "success"}})}
+        # The scope's base: the previous head, as when the last push run was green.
+        self.inputs["INPUT_BASE"] = self.fixture.base
         patcher = patch.dict(os.environ, self.inputs)
         patcher.start()
         self.addCleanup(patcher.stop)
@@ -170,7 +172,7 @@ class AcceptanceTests(unittest.TestCase):
         (reused, reason), api = self.verify()
         self.assertTrue(reused, reason)
         self.assertIn(self.fixture.tree, reason)
-        self.assertTrue(self.verdict.green_parent)
+        self.assertTrue(self.verdict.green_base)
         self.assertEqual(api.calls, [
             ("actions/workflows/ci.yml/runs",
              {"head_sha": self.fixture.base, "branch": "main", "status": "success", "per_page": 100}),
@@ -257,9 +259,10 @@ class AcceptanceTests(unittest.TestCase):
                     self.assertRaises(ValueError):
                 self.verify()
 
-    def test_a_red_parent_never_reuses(self):
-        # Push run R1 on the parent failed a job the pull request's scope
-        # skipped; reusing the receipt would make the merge the next green base.
+    def test_a_red_base_never_reuses(self):
+        # The scope measured the push from base; if base did not pass, a job
+        # the change does not touch may be the one failing, and reusing the
+        # rest would make this push the next green base with it unchecked.
         cases = {
             "no trunk run": [],
             "failed trunk run": [self.trunk_run(conclusion="failure")],
@@ -273,13 +276,59 @@ class AcceptanceTests(unittest.TestCase):
             with self.subTest(name):
                 (reused, reason), api = self.verify(trunk=trunk)
                 self.assertFalse(reused, reason)
-                self.assertIs(self.verdict.green_parent, False)
+                self.assertIs(self.verdict.green_base, False)
                 self.assertIn("has no green run of ci.yml", reason)
-                self.assertEqual(len(api.calls), 1, "no pull request lookup on a red parent")
+                self.assertEqual(len(api.calls), 1, "no pull request lookup on a red base")
         for event in ("schedule", "workflow_dispatch"):
             with self.subTest(event=event):
                 (reused, reason), _ = self.verify(trunk=[self.trunk_run(event=event)])
                 self.assertTrue(reused, reason)
+
+    def test_a_green_base_older_than_the_parent_reuses(self):
+        green = "6" * 40
+        cases = {
+            # A path-filtered workflow did not run on the parent at all.
+            "path-filtered workflow": ({}, [self.trunk_run(head_sha=green)]),
+            # The previous push's run had not finished when this one landed.
+            "parent run in progress": ({}, [self.trunk_run(head_sha=self.fixture.base, status="in_progress", conclusion=None),
+                                            self.trunk_run(id=31, head_sha=green)]),
+            # A release workflow calls ci.yml; its green runs on main are nightly ones.
+            "called workflow": ({"INPUT_WORKFLOW": "ci.yml"}, [self.trunk_run(head_sha=green, event="schedule")]),
+        }
+        for name, (inputs, trunk) in cases.items():
+            with self.subTest(name), patch.dict(os.environ, {"INPUT_BASE": green, "INPUT_REQUIRED": '["lint", "test"]', **inputs}):
+                receipt = self.receipt()
+                caller = f"{REPOSITORY}/.github/workflows/release.yml@refs/heads/main"
+                env = self.push_env(GITHUB_WORKFLOW_REF=caller) if inputs else self.push_env()
+                (reused, reason), api = self.verify(env=env, trunk=trunk, receipt=receipt)
+                self.assertTrue(reused, reason)
+                self.assertIs(self.verdict.green_base, True)
+                self.assertEqual(api.calls[0], ("actions/workflows/ci.yml/runs",
+                                                {"head_sha": green, "branch": "main", "status": "success", "per_page": 100}))
+                self.assertIn("on green base " + green, reason)
+
+    def test_without_a_base_the_parent_must_be_green(self):
+        # A caller that passes no base, such as one bumped from v1.8.0
+        # unedited, keeps v1.8.0's check on the merge's parent.
+        with patch.dict(os.environ, {"INPUT_BASE": "", "INPUT_REQUIRED": '["lint", "test"]'}):
+            (reused, reason), api = self.verify()
+            self.assertTrue(reused, reason)
+            self.assertIs(self.verdict.green_base, True)
+            self.assertEqual(api.calls[0][1]["head_sha"], self.fixture.base, "the parent")
+            (reused, reason), _ = self.verify(trunk=[])
+            self.assertFalse(reused, reason)
+            self.assertIn("(no base given)", reason)
+        # Unscoped, the pull request ran every job on this tree: no trunk check.
+        with patch.dict(os.environ, {"INPUT_BASE": "", "INPUT_REQUIRED": ""}):
+            (reused, reason), api = self.verify(trunk=[])
+            self.assertTrue(reused, reason)
+            self.assertIsNone(self.verdict.green_base)
+            self.assertEqual([call[1].get("event") for call in api.calls], ["pull_request"])
+
+    def test_invalid_base_fails_the_step(self):
+        for base in ("abc", "G" * 40, "a" * 39):
+            with self.subTest(base=base), patch.dict(os.environ, {"INPUT_BASE": base}), self.assertRaises(ValueError):
+                self.verify()
 
     def test_single_parent_push_runs_every_check(self):
         receipt = self.receipt()
@@ -294,11 +343,11 @@ class AcceptanceTests(unittest.TestCase):
             def get(self, path, **query):
                 raise OSError("connection refused")
 
-        reused, reason, green_parent, remaining = acceptance.verify(self.push_env(), api=Broken(),
+        reused, reason, green_base, remaining = acceptance.verify(self.push_env(), api=Broken(),
                                                                     receipts=lambda run, name: None, now=lambda: NOW)
         self.assertIsNone(remaining, "every required job runs")
         self.assertFalse(reused)
-        self.assertIsNone(green_parent)
+        self.assertIsNone(green_base)
         self.assertIn("connection refused", reason)
 
     def test_receipt_archive_holds_exactly_the_receipt(self):

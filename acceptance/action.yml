@@ -12,6 +12,9 @@ inputs:
   required:
     description: "verify: the jobs this push would run, as a JSON array (a scope output) or one per line; reused only when each passed in the pull request. Empty requires every job the receipt names to have passed."
     default: ""
+  base:
+    description: "verify: the scope action's base output, the commit required was measured from. Reuse needs a green trunk run of the workflow on it; without it, the merge's parent must have one."
+    default: ""
   variables:
     description: "toJSON(vars). A receipt recorded under other repository variables is not reused."
     default: "{}"
@@ -40,9 +43,12 @@ outputs:
   remaining:
     description: "verify: JSON array of the required jobs the push still runs: those the matching receipt does not show passed, all of them without one, none when reused. Empty without required."
     value: ${{ steps.acceptance.outputs.remaining }}
+  green_base:
+    description: "verify: true when base (or, without it, the merge's parent) has a green run of the workflow on the default branch, false when not (no reuse), empty when unscoped or when verify stopped before asking."
+    value: ${{ steps.acceptance.outputs.green_base }}
   green_parent:
-    description: "verify: true when the commit the merge sits on has a green run of the workflow on the default branch, false when not (no reuse), empty when verify stopped before asking."
-    value: ${{ steps.acceptance.outputs.green_parent }}
+    description: "Deprecated: the same value as green_base, kept for one minor release so v1.8.0 and v1.9.0 consumers can bump without edits; removed in v1.11.0."
+    value: ${{ steps.acceptance.outputs.green_base }}
 runs:
   using: composite
   steps:
@@ -52,6 +58,7 @@ runs:
         INPUT_MODE: ${{ inputs.mode }}
         INPUT_RESULTS: ${{ inputs.results }}
         INPUT_REQUIRED: ${{ inputs.required }}
+        INPUT_BASE: ${{ inputs.base }}
         INPUT_VARIABLES: ${{ inputs.variables }}
         INPUT_WORKFLOW: ${{ inputs.workflow }}
         INPUT_NAME: ${{ inputs.name }}
