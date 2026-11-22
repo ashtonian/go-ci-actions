@@ -88,10 +88,22 @@ test('a push is measured from the newest green run on its branch', async () => {
 });
 
 test('scheduled, dispatched and requested runs check everything', async () => {
-  for (const name of ['schedule', 'workflow_dispatch', 'release']) assert.equal((await base(name)).full, true, name);
+  for (const name of ['workflow_dispatch', 'release']) assert.equal((await base(name)).full, true, name);
+  assert.equal((await base('schedule', {}, {greenRuns: async () => []})).full, true);
   assert.equal((await base('push', {}, {forceFull: true})).full, true);
   assert.deepEqual(await base('merge_group', {merge_group: {base_sha: A}}),
     {full: false, base: A, reason: 'changes the merge group adds to ' + A.slice(0, 12)});
+});
+
+test('a scheduled run skips a commit the last green scheduled run checked', async () => {
+  const runs = [greenRun(9, {event: 'schedule', head_sha: H}), greenRun(8, {head_sha: H}),
+    greenRun(7, {event: 'schedule', head_sha: H, head_repository: {full_name: 'fork/r'}}), greenRun(6, {event: 'schedule'})];
+  const moved = await base('schedule', {}, {greenRuns: async () => runs});
+  assert.equal(moved.full, true, 'the current run, pushes and forks are passed over');
+  assert.match(moved.reason, /changed since .*runs\/6$/);
+  const same = await base('schedule', {}, {greenRuns: async () => [greenRun(5, {event: 'schedule', head_sha: H})]});
+  assert.deepEqual([same.full, same.base], [false, H]);
+  assert.equal((await base('schedule', {}, {forceFull: true})).full, true);
 });
 
 test('jobs run when their paths change or their Go packages are affected', () => {
@@ -233,9 +245,16 @@ test('packaged action runs everything when it cannot decide', async t => {
         head_repository: {full_name: 'o/r'}, html_url: 'u'}]}}});
   assert.equal(missing.outputs.full, 'true', 'a base that cannot be fetched');
   assert.match(missing.outputs.reason, /diff against e+ is unavailable/);
-  const scheduled = await runScope(t, repo, {event: 'schedule', payload: {}});
+  const scheduled = await runScope(t, repo, {event: 'schedule', payload: {},
+    routes: {'/repos/o/r/actions/workflows/ci.yml/runs': {workflow_runs: []}}});
   assert.equal(scheduled.outputs.full, 'true');
   assert.equal(scheduled.outputs.files, '');
+  const unchanged = await runScope(t, repo, {event: 'schedule', payload: {},
+    routes: {'/repos/o/r/actions/workflows/ci.yml/runs': {workflow_runs: [
+      {id: 8, conclusion: 'success', head_branch: 'main', event: 'schedule', head_sha: repo.merge,
+        head_repository: {full_name: 'o/r'}, html_url: 'https://github.com/o/r/actions/runs/8'}]}}});
+  assert.deepEqual([unchanged.outputs.full, unchanged.outputs.jobs], ['false', '[]']);
+  assert.match(unchanged.outputs.reason, /last green scheduled run already checked/);
 });
 
 test('packaged action narrows Go jobs to the affected packages', async t => {

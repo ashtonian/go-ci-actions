@@ -225,11 +225,14 @@ changed".
   so a push whose predecessor failed or was cancelled still checks that
   predecessor's changes. A shallow checkout is enough: the base commit is
   fetched with the job token when it is missing.
-- **Full runs.** `schedule`, `workflow_dispatch`, a pull request labelled
-  `full-label` (`full-ci`), `full: true`, a tag push and any other event run
-  every job and every package. So does anything the scope cannot decide: no
-  green run to compare with, a run-history API error, a base that cannot be
-  fetched or diffed. Those log a warning and set `reason`.
+- **Full runs.** `workflow_dispatch`, a pull request labelled `full-label`
+  (`full-ci`), `full: true`, a tag push and any other event run every job and
+  every package. A `schedule` run does too, unless the newest green scheduled
+  run of the workflow on the branch was on this same commit: then the branch
+  has not moved since the last green nightly and nothing runs. So does
+  anything the scope cannot decide: no green run to compare with, a
+  run-history API error, a base that cannot be fetched or diffed. Those log a
+  warning and set `reason`.
 - **Jobs.** `jobs` maps each job ID to its inputs: path globs, Go package
   patterns, or both. A job runs when one of its paths changed or one of its Go
   packages is affected. A Go job's paths are its own configuration and
