@@ -1,0 +1,34 @@
+name: buildx-cache
+description: >-
+  BuildKit cache references for one image build: a registry cache the job is
+  logged in to, scoped so a pull request never changes what the default branch
+  imports, or GitHub's cache when no registry is named.
+inputs:
+  registry:
+    description: "Registry host the job is logged in to, without a scheme. Empty uses GitHub's cache (type=gha)."
+    default: ""
+  repository:
+    description: "Repository under the registry that holds the cache manifests, such as project/buildcache/image. Required with registry."
+    default: ""
+  scope:
+    description: "Names this build among those sharing a repository or the GitHub cache."
+    default: ${{ github.job }}
+  platforms:
+    description: "The build's platforms, comma- or newline-separated. Empty is the builder's default."
+    default: ""
+  mode:
+    description: "max exports every stage's layers; min only the final image's."
+    default: max
+  builder:
+    description: "buildx builder the build uses, checked when platforms names more than one. Empty is the current builder."
+    default: ""
+outputs:
+  cache-from:
+    description: "Import entries, one per line, for docker/build-push-action's cache-from or repeated --cache-from."
+  cache-to:
+    description: "The export entry, for cache-to or --cache-to."
+  backend:
+    description: "registry or gha."
+runs:
+  using: node24
+  main: index.cjs

@@ -296,6 +296,67 @@ selection from there. Use it once per job. A Dockerfile that cross-compiles in
 `$BUILDPLATFORM` stages should keep a single amd64 builder, because on this
 builder its compile stage would run on the arm64 node.
 
+## BuildKit cache
+
+`ashtonian/go-ci-actions/buildx-cache@FULL_COMMIT_SHA` gives one image build
+its BuildKit `cache-from` and `cache-to` entries: a registry cache in a
+registry the job is already logged in to, or GitHub's cache when it names no
+registry.
+
+```yaml
+- uses: docker/login-action@<sha>
+  with: {registry: "${{ secrets.HARBOR_REGISTRY }}", username: ..., password: ...}
+- id: cache
+  uses: ashtonian/go-ci-actions/buildx-cache@FULL_COMMIT_SHA
+  with:
+    registry: ${{ secrets.HARBOR_REGISTRY }}
+    repository: karsto/buildcache/server
+    platforms: linux/amd64
+- uses: docker/build-push-action@<sha>
+  with:
+    platforms: linux/amd64
+    cache-from: ${{ steps.cache.outputs.cache-from }}
+    cache-to: ${{ steps.cache.outputs.cache-to }}
+```
+
+A registry has no branch scoping of its own, so the tag carries it. The
+default branch (pushes, schedules and dispatches on it) writes and reads
+`<scope>`; a pull request writes `<scope>--pr-<number>` and reads it, then
+`<scope>`; any other branch does the same with `branch-<name>`, a merge group
+with `merge-group`. A pull request therefore never changes the layers a
+default-branch build imports, which is the isolation GitHub's cache gives. The
+export is an OCI image manifest (`image-manifest=true,oci-mediatypes=true`),
+which Harbor stores where it refuses BuildKit's default cache index, with
+`ignore-error=true` so a failed export does not fail the build; a missing or
+unreadable import is a cold build. Without a registry the entries are
+`type=gha,scope=<scope>` (GitHub scopes them by branch itself).
+
+Platforms name the cache too: `platforms: linux/amd64` writes
+`<scope>--linux-amd64`. On a builder with more than one node, such as
+[buildx-native](#native-multi-arch-builder)'s, every node exports its own
+platform's cache to the same reference and the last to finish wins: measured
+on a two-node builder, a cold rebuild reused the amd64 layers and re-ran every
+arm64 step. The action therefore refuses more than one platform on a
+multi-node builder (it reads `docker buildx inspect`); build each platform in
+its own invocation with its own `platforms` and combine the digests
+(`docker buildx imagetools create`). A single-node builder exporting several
+platforms writes them in one manifest and is accepted.
+
+Inputs: `registry` (host, no scheme; empty uses `type=gha`), `repository`
+(required with a registry: a lower-case path, by convention
+`<project>/buildcache/<image>`, so a retention rule can match the cache
+repositories alone), `scope` (default the job ID), `platforms` (comma- or
+newline-separated, default empty), `mode` (`max`, every stage's layers, or
+`min`) and `builder` (default the current one). Outputs: `cache-from` (one
+entry per line, as build-push-action takes it; repeat `--cache-from` per line
+for `docker buildx build`), `cache-to` and `backend` (`registry` or `gha`).
+
+Credentials and reach are the runner's and the repository's, not this
+action's: the job logs in to the registry with a robot that may push to the
+project, and the builder's nodes must reach the registry and its layer
+storage. In the site's runners that is Harbor for the private sets; public
+sets, whose egress excludes the LAN, use GitHub's cache.
+
 ## Change scope
 
 `ashtonian/go-ci-actions/scope@FULL_COMMIT_SHA` decides which of a workflow's
@@ -594,7 +655,9 @@ no failed or cancelled job, that it lists passed and skipped jobs apart, and
 that verify reuses validation only for a matching receipt that passed every
 required job, against a real Git merge fixture; the smoke job runs it. The
 history tests cover already-passed's decision over earlier runs and the
-packaged action against a stub API. The scope tests cover globs, Go package
+packaged action against a stub API. The buildx-cache tests cover the tag per
+ref and platform, the GitHub-cache fallback, input validation, and the
+packaged action refusing a multi-platform cache on a two-node builder. The scope tests cover globs, Go package
 patterns, configuration errors, each event's base, job selection, and the
 packaged action over real shallow clones (a pull request merge whose base it
 fetches, a push against a stubbed green run, every fallback to a full run, and

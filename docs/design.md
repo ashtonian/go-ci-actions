@@ -74,6 +74,18 @@ writing Git's index format here. It is on by default because consumers own
 which lanes keep `-count=1`, and the cost of a stale cached result is bounded
 by the files Go can see; the make hazard is the reason it has an opt-out.
 
+BuildKit layer caches move to a registry because the GitHub cache is the
+eviction this document already records: on 2026-10-21 BuildKit blobs (7.8 GiB)
+filled one repository's 10 GiB and evicted every Go entry. A registry cache
+lives in the project the job already pushes to, under that project's robot,
+so no new credential exists. What GitHub's cache gave for free, scoping by
+branch, is carried in the tag: only the default branch writes the tag every
+other ref reads. The action computes references and checks the builder; it
+does not log in, push, or choose a registry. A multi-platform build on a
+multi-node builder is refused rather than cached, because each node exports to
+the same reference and all but the last node's platform would be lost
+silently.
+
 The lifecycle hook is declared after actions/cache, so reverse post ordering
 prunes before upload. Its cutoff is relative to setup start, preserving objects
 used early in long jobs. Failed/cancelled jobs do not publish state; read-only
