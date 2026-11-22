@@ -52,9 +52,11 @@ an empty digest. The identity step logs how many manifests it hashed.
 
 Before successful post-save, build objects unused since setup began are pruned
 with two hours of slack for Go's mtime-touch granularity. Long jobs retain
-objects used early. Module source is not age-trimmed. Logs and job summaries
-report restored/missed state, module/build bytes, trimmed bytes and maintenance
-time. Official cache logs report transfer timing.
+objects used early. Module source is not age-trimmed. The post step walks only
+the directories the archive holds and does not run when nothing is archived.
+Logs and job summaries report restored/missed state, module/build bytes (`not
+archived` for a directory the archive does not hold), trimmed bytes and
+maintenance time. Official cache logs report transfer timing.
 
 ## Remote build cache
 
@@ -100,8 +102,8 @@ without the run ID or compiler. Module content is fixed by the manifests, so
 each workload saves once per manifest set instead of once per run. Restores
 fall back to the same workload's older manifests, then (with
 seed-from-other-workloads) to any workload's archive. The local plugin
-directory is per job and is not trimmed or archived; max-staleness-hours
-applies to the GitHub backend only.
+directory is per job and is not trimmed, measured or archived;
+max-staleness-hours applies to the GitHub backend only.
 
 ## Module proxy
 
@@ -193,9 +195,9 @@ bundle declares is the one in use. The remote contract also checks that the
 module archive key hashes only the manifests under go-version-file's
 directory, and the disabled contract that off mode has no key. Policy tests
 cover reruns, invalid inputs, safe pruning, long-running jobs, backend
-selection, manifest scoping and patterns, skipping the digest when nothing is
-archived, and the npm registry cache's selection, precedence and health paths.
-No npm dependencies.
+selection, manifest scoping and patterns, skipping the digest and the post-step
+walk when nothing is archived, and the npm registry cache's selection,
+precedence and health paths. No npm dependencies.
 
 Release signed commits with immutable version tags. Upgrade consumers through
 reviewed SHA changes and roll back to the previous SHA. Measure cold, warm,

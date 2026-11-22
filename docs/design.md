@@ -49,6 +49,15 @@ the container's filesystem/environment. Discovery does not install software,
 copy credentials or change cache authorization. A missing helper retains the
 existing archive fallback; invalid published configuration fails explicitly.
 
+Setup does no work for an archive that does not exist. With the remote
+backend and a ready module proxy nothing is archived. Measured on 2026-11-22,
+hashing every manifest in the workspace took 6.8-7.3 s in estavelle jobs that
+check out gox and karsto beside it, and walking the plugin directory and module
+cache after the job covered 9.8 GB on estavelle's build job, for a key and
+sizes nothing uses. So the identity step computes the digest only when an
+archive needs a key, over the module go-version-file names rather than the
+whole workspace, and the post step walks only archived directories.
+
 The lifecycle hook is declared after actions/cache, so reverse post ordering
 prunes before upload. Its cutoff is relative to setup start, preserving objects
 used early in long jobs. Failed/cancelled jobs do not publish state; read-only

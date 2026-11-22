@@ -103,7 +103,7 @@ runs:
         lookup-only: true
     # Reverse post ordering trims before the official cache action uploads.
     - uses: $/_lifecycle
-      if: inputs.cache-mode != 'off'
+      if: steps.identity.outputs.paths != ''
       with:
         build: ${{ steps.identity.outputs.build }}
         modules: ${{ steps.identity.outputs.modules }}
