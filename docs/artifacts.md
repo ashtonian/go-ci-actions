@@ -98,6 +98,19 @@ Consumers can call `.github/workflows/artifact-consumer.yml` with their runner
 label to check repository OIDC, endpoint configuration and an exact byte/layout
 round trip without running application suites. Trigger it when artifact workflow
 configuration changes; the shared native contract owns the full isolation tests.
+A called workflow sees only the secrets its caller passes, so pass the endpoint
+explicitly, not with `secrets: inherit`, which would hand it every secret the
+repository holds:
+
+```yaml
+jobs:
+  contract:
+    uses: ashtonian/go-ci-actions/.github/workflows/artifact-consumer.yml@<reviewed-commit>
+    with:
+      runner: <runner label>
+    secrets:
+      CI_ARTIFACT_ENDPOINT: ${{ secrets.CI_ARTIFACT_ENDPOINT }}
+```
 
 ## Operations
 
