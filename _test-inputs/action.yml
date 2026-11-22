@@ -1,0 +1,15 @@
+name: Stamp test input mtimes
+description: Internal content-derived mtimes for the checkout's tracked files.
+inputs:
+  mode:
+    description: content or off.
+  cache-mode:
+    description: Cache mode.
+  go-version-file:
+    description: Go version file relative to the workspace; its Git work tree is stamped.
+outputs:
+  state:
+    description: content when the work tree was stamped, off otherwise.
+runs:
+  using: node24
+  main: index.cjs
