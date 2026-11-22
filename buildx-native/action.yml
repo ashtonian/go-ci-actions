@@ -1,0 +1,98 @@
+name: buildx-native
+description: >-
+  Select a buildx builder with one native node per architecture for the rest of
+  the job: linux/amd64 on a BuildKit in the job's own Docker daemon, linux/arm64
+  on the runner's remote arm64 BuildKit. A multi-platform build runs each
+  platform's RUN steps on its own CPU, without emulation. Use it once per job.
+inputs:
+  arm64-endpoint:
+    description: "The arm64 BuildKit's tcp:// address. Empty reads BUILDKIT_ARM64_ENDPOINT from the runner."
+    default: ""
+  arm64-tls-dir:
+    description: "Directory holding the arm64 BuildKit's ca.crt, tls.crt and tls.key. Empty reads BUILDKIT_ARM64_TLS_DIR from the runner."
+    default: ""
+outputs:
+  name:
+    description: Name of the builder, also the job's current builder.
+    value: ${{ steps.builder.outputs.name }}
+runs:
+  using: composite
+  steps:
+    - name: Resolve the arm64 BuildKit
+      id: arm64
+      shell: bash
+      env:
+        INPUT_ENDPOINT: ${{ inputs.arm64-endpoint }}
+        INPUT_TLS_DIR: ${{ inputs.arm64-tls-dir }}
+      run: |
+        set -euo pipefail
+        endpoint=${INPUT_ENDPOINT:-${BUILDKIT_ARM64_ENDPOINT:-}}
+        tls_dir=${INPUT_TLS_DIR:-${BUILDKIT_ARM64_TLS_DIR:-}}
+        if [ -z "$endpoint" ] || [ -z "$tls_dir" ]; then
+          echo "::error::buildx-native needs an arm64 BuildKit: set arm64-endpoint and arm64-tls-dir, or run on a runner that exports BUILDKIT_ARM64_ENDPOINT and BUILDKIT_ARM64_TLS_DIR"
+          exit 1
+        fi
+        case "$endpoint" in
+          tcp://*:*) ;;
+          *) echo "::error::arm64-endpoint must be tcp://host:port, got $endpoint"; exit 1 ;;
+        esac
+        for file in ca.crt tls.crt tls.key; do
+          if [ ! -r "$tls_dir/$file" ]; then
+            echo "::error::$tls_dir/$file is missing: this runner holds no arm64 BuildKit client certificate"
+            exit 1
+          fi
+        done
+        host=${endpoint#tcp://}
+        {
+          echo "endpoint=$endpoint"
+          echo "servername=${host%:*}"
+          echo "tls-dir=$tls_dir"
+        } >> "$GITHUB_OUTPUT"
+
+    - name: Start the amd64 BuildKit in the job's Docker daemon
+      shell: bash
+      env:
+        # renovate: datasource=docker depName=moby/buildkit
+        BUILDKIT_VERSION: v0.34.1@sha256:99368f3e46177c6405b9740e4461d91cee004128daeecca78d4ceac50ec1da5c
+        NODE: buildx-native-amd64
+      run: |
+        set -euo pipefail
+        # BuildKit ignores the daemon's --registry-mirror, so the runner's
+        # BuildKit config, when present, carries the Docker Hub mirror.
+        MIRROR_CONFIG="$HOME/.docker/buildx/buildkitd.default.toml"
+        docker create --name "$NODE" --privileged "moby/buildkit:$BUILDKIT_VERSION" >/dev/null
+        if [ -f "$MIRROR_CONFIG" ]; then
+          docker cp "$MIRROR_CONFIG" "$NODE:/etc/buildkit/buildkitd.toml"
+        fi
+        docker start "$NODE" >/dev/null
+        for _ in $(seq 1 30); do
+          if docker exec "$NODE" buildctl debug workers >/dev/null 2>&1; then
+            break
+          fi
+          sleep 1
+        done
+        docker exec "$NODE" buildctl debug workers
+
+        # buildx applies $BUILDX_CONFIG/buildkitd.default.toml to every new
+        # builder and the remote driver refuses a config file. An empty config
+        # directory for the rest of the job also keeps the builder selection
+        # where later `docker buildx` calls (GoReleaser, build-push-action)
+        # read it.
+        mkdir -p "$RUNNER_TEMP/buildx-native"
+        echo "BUILDX_CONFIG=$RUNNER_TEMP/buildx-native" >> "$GITHUB_ENV"
+
+    - name: Create the builder
+      id: builder
+      uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      with:
+        driver: remote
+        endpoint: docker-container://buildx-native-amd64
+        platforms: linux/amd64
+        append: |
+          - endpoint: ${{ steps.arm64.outputs.endpoint }}
+            platforms: linux/arm64
+            driver-opts:
+              - cacert=${{ steps.arm64.outputs.tls-dir }}/ca.crt
+              - cert=${{ steps.arm64.outputs.tls-dir }}/tls.crt
+              - key=${{ steps.arm64.outputs.tls-dir }}/tls.key
+              - servername=${{ steps.arm64.outputs.servername }}
