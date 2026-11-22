@@ -165,6 +165,7 @@ permissions are not an artifact contract; archive a tarball when those matter.
 
 - `lib/artifact.py`: shared transport, manifests, archive rules and CLI.
 - `lib/acceptance.py`, `acceptance/`: pull request validation receipts and their push-time verification.
+- `lib/runner_labels.py`, `runner-labels/`: the check that every runner label a workflow names is one a runner carries.
 - `lib/artifact-entry.cjs`: bounded Python launch for Node actions.
 - `upload-artifact/`, `download-artifact/`, `artifact-setup/`: action interfaces.
 - `test/artifact_test.py`, `test/artifact-native.py`: contract and native checks.

@@ -806,14 +806,28 @@ A label passes when the list holds it, when it is a GitHub-hosted image
 Anything else is an error annotated at its line. An expression with no
 literal (`${{ inputs.runner }}`) is checked where its value is written.
 
-The list comes from `labels-file` when given, else from `endpoint`, else from
-the runner's `CI_RUNNER_LABELS_URL`: `GET <endpoint>/v1/labels?repository=<owner>/<name>`
-answering `{"labels": [...]}`, with a 10-second timeout. Only a definitive
-list fails the step. When the service does not answer, answers anything but
-a label list, or no source is configured (a GitHub-hosted runner, a host
-outside the cluster), the step warns, writes `checked=false` and passes, so
-the service is never a hard dependency of every repository's CI; detecting
-queued jobs is the backstop.
+The list comes from `labels-file` when given, else from the runner label
+service: `endpoint`, else the runner's `CI_RUNNER_LABELS_URL`, else
+`runnerLabelsURL` in the runner bundle (`$RUNNER_TOOL_CACHE/go-ci-cache/v1/config.json`,
+which a job container sees as well). It sends
+`GET <endpoint>/v1/labels?repository=<owner>/<name>` and expects `200` with
+`{"labels": [...]}`, with a 3-second connect and a 10-second read timeout and
+a 1 MiB answer limit. Each URL must be HTTP(S) without credentials or a
+fragment, as for the other runner services.
+
+Failure modes, and what each does:
+
+| Case | Result |
+|---|---|
+| A workflow names a label the list lacks | an error annotation at its line; the step fails |
+| The service refuses, times out, answers non-`200`, oversized or malformed | `::warning::runner label check skipped: <why>`, `checked=false`, the step passes |
+| No source: no input, variable or bundle entry (a GitHub-hosted runner, a host outside the cluster) | the same warning, naming what is missing |
+| The runner's own URL is malformed | the same warning: it is the runner's to fix, not the change's |
+| The `endpoint` input is malformed | the step fails |
+
+Skipping rather than failing keeps the service from becoming a hard
+dependency of every repository's CI; the site's alerting on queued jobs is
+the backstop, and the warning says the check did not run.
 
 ```yaml
 jobs:
@@ -829,7 +843,8 @@ Inputs: `endpoint`, `labels-file` (a list, `{"labels": [...]}`, or
 `{scope: [...]}` keyed by owner and `owner/name`, as the site's
 `runner-labels.py labels` prints for a dev host), `repository`
 (`github.repository`), `workflows` and `allow` (fnmatch patterns, one per
-line). Output: `checked`. No token; the service needs none.
+line). Output: `checked`. Permissions: none beyond the checkout's `contents:
+read`; it sends no token, and the service needs none. Python 3.9+.
 
 ## Ownership and validation
 

@@ -174,6 +174,27 @@ class ServiceTests(Workflows):
         self.server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Answer)
         threading.Thread(target=self.server.serve_forever, daemon=True).start()
 
+    def test_the_runner_bundle_names_the_service_for_job_containers(self):
+        bundle = self.root / "tool" / "go-ci-cache" / "v1"
+        bundle.mkdir(parents=True)
+        (bundle / "config.json").write_text(json.dumps({"version": 1, "runnerLabelsURL": self.endpoint}))
+        with patch("sys.stdout", io.StringIO()):
+            code = runner_labels.main({"GITHUB_REPOSITORY": "owner/repo", "INPUT_WORKFLOWS": str(self.root),
+                                       "RUNNER_TOOL_CACHE": str(self.root / "tool")})
+        self.assertEqual(code, 1)
+        self.assertEqual(len(Answer.seen), 1)
+
+    def test_a_broken_runner_setting_skips_and_a_broken_input_fails(self):
+        for url in ["ftp://host", "http://user:secret@host", "http://host/#frag", "http://a,http://b"]:
+            with self.subTest(url=url):
+                with patch("sys.stdout", io.StringIO()) as stdout:
+                    code = runner_labels.main({"GITHUB_REPOSITORY": "owner/repo", "INPUT_WORKFLOWS": str(self.root),
+                                               "CI_RUNNER_LABELS_URL": url})
+                self.assertEqual(code, 0)
+                self.assertIn("runner label check skipped", stdout.getvalue())
+                with self.assertRaises(ValueError):
+                    self.run_main(endpoint=url)
+
     def test_the_runner_variable_names_the_service(self):
         with patch("sys.stdout", io.StringIO()):
             code = runner_labels.main({"GITHUB_REPOSITORY": "owner/repo", "INPUT_WORKFLOWS": str(self.root),

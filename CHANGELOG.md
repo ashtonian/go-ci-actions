@@ -3,6 +3,18 @@
 Releases are signed tags on merge commits of `main`. Pin the full commit SHA
 with the tag as a comment (`@<sha> # vX.Y.Z`).
 
+## v1.12.0
+
+- **runner-labels (new):** fails a workflow that names a self-hosted runner
+  label no runner of the repository carries, a job GitHub would leave queued
+  until cancelled. It reads `runs-on` in every form, matrix values, and the
+  `runner`/`*-runner` inputs of reusable workflow calls, and checks them
+  against the labels the site's runner label service serves for the
+  repository (`endpoint`, else `CI_RUNNER_LABELS_URL`, else `runnerLabelsURL`
+  in the runner bundle) or against `labels-file`. Only a definitive list fails
+  it; an unreachable, failing or unconfigured service skips the check with a
+  warning.
+
 ## v1.11.1
 
 - **acceptance:** a `workflow_dispatch` run on a branch records a receipt for

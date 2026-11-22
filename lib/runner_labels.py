@@ -6,27 +6,30 @@ carries. The job waits until it is cancelled, and its run holds its
 concurrency group meanwhile. This reads every workflow's runs-on, the
 `runner`/`*-runner` inputs of reusable workflow calls and the defaults of such
 inputs, and checks each label against the labels the repository's runners
-carry. Those come from the runner label service (endpoint, or the runner's
-CI_RUNNER_LABELS_URL) or from labels-file.
+carry. Those come from labels-file, or from the runner label service: the
+endpoint input, else the runner's CI_RUNNER_LABELS_URL, else runnerLabelsURL
+in the runner bundle ($RUNNER_TOOL_CACHE/go-ci-cache/v1/config.json, which
+job containers see too).
 
 Only a definitive answer fails: when the service cannot be reached, or no list
 is configured, the step warns and passes.
 """
 
 import fnmatch
+import http.client
 import json
 import os
 from pathlib import Path
 import re
 import sys
-import urllib.error
 import urllib.parse
-import urllib.request
 
 # GitHub-hosted images: valid wherever the account may use hosted runners.
 HOSTED = ("ubuntu-*", "windows-*", "macos-*")
-API_TIMEOUT = 10
+CONNECT_TIMEOUT = 3
+READ_TIMEOUT = 10
 MAX_RESPONSE = 1024 * 1024
+MAX_BUNDLE = 64 * 1024
 REPOSITORY = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})/[A-Za-z0-9._-]{1,100}")
 
 # A workflow outline parser:
@@ -242,14 +245,45 @@ def scoped(data, repository):
     raise ValueError("labels-file must hold a list, {\"labels\": [...]}, or {scope: [...]}")
 
 
+def service_url(name, value):
+    """value as an HTTP(S) origin without credentials or a fragment, as the setup action takes runner URLs."""
+    if not isinstance(value, str) or re.search(r"[\s,|]", value):
+        raise ValueError(f"{name} must be a single HTTP(S) URL")
+    url = urllib.parse.urlsplit(value)
+    if url.scheme not in ("http", "https") or not url.hostname or url.username or url.password or url.fragment:
+        raise ValueError(f"{name} must be HTTP(S) without credentials or a fragment")
+    return value
+
+
+def bundle_url(env):
+    """runnerLabelsURL from the runner-owned bundle under the tool cache, or empty."""
+    cache = env.get("RUNNER_TOOL_CACHE", "")
+    if not cache:
+        return ""
+    path = Path(cache) / "go-ci-cache" / "v1" / "config.json"
+    if not path.is_file() or path.stat().st_size > MAX_BUNDLE:
+        return ""
+    config = json.loads(path.read_text(encoding="utf-8"))
+    return config.get("runnerLabelsURL", "") if isinstance(config, dict) and config.get("version") == 1 else ""
+
+
 def fetch(endpoint, repository):
-    url = endpoint.rstrip("/") + "/v1/labels?" + urllib.parse.urlencode({"repository": repository})
-    request = urllib.request.Request(url, headers={"Accept": "application/json"})
+    url = urllib.parse.urlsplit(endpoint.rstrip("/"))
+    target = url.path + "/v1/labels?" + urllib.parse.urlencode({"repository": repository})
+    connection_type = http.client.HTTPSConnection if url.scheme == "https" else http.client.HTTPConnection
+    connection = connection_type(url.hostname, url.port, timeout=CONNECT_TIMEOUT)
     try:
-        with urllib.request.urlopen(request, timeout=API_TIMEOUT) as response:
-            body = response.read(MAX_RESPONSE + 1)
-    except (urllib.error.URLError, OSError, ValueError) as error:
+        connection.connect()
+        connection.sock.settimeout(READ_TIMEOUT)
+        connection.request("GET", target, headers={"Accept": "application/json"})
+        response = connection.getresponse()
+        body = response.read(MAX_RESPONSE + 1)
+    except (OSError, http.client.HTTPException) as error:
         raise Unavailable(f"the runner label service did not answer ({error})") from error
+    finally:
+        connection.close()
+    if response.status != 200:
+        raise Unavailable(f"the runner label service answered HTTP {response.status}")
     if len(body) > MAX_RESPONSE:
         raise Unavailable("the runner label service's answer is oversized")
     try:
@@ -265,11 +299,19 @@ def runner_labels(env, repository):
     path = env.get("INPUT_LABELS_FILE", "").strip()
     if path:
         return scoped(json.loads(Path(path).read_text(encoding="utf-8")), repository)
-    endpoint = env.get("INPUT_ENDPOINT", "").strip() or env.get("CI_RUNNER_LABELS_URL", "").strip()
-    if not endpoint:
-        raise Unavailable("no runner label list: this runner sets no CI_RUNNER_LABELS_URL, and neither "
-                          "endpoint nor labels-file is given")
-    return fetch(endpoint, repository)
+    endpoint = env.get("INPUT_ENDPOINT", "").strip()
+    if endpoint:
+        return fetch(service_url("endpoint", endpoint), repository)
+    # A runner's own setting that is broken is the runner's problem, not this
+    # change's: it skips the check like a missing one.
+    try:
+        endpoint = env.get("CI_RUNNER_LABELS_URL", "").strip() or bundle_url(env)
+        if endpoint:
+            return fetch(service_url("the runner's label service URL", endpoint), repository)
+    except (ValueError, OSError) as error:
+        raise Unavailable(f"the runner's label service setting is unusable ({error})") from error
+    raise Unavailable("no runner label list: the runner names no label service (CI_RUNNER_LABELS_URL or "
+                      "runnerLabelsURL in its bundle), and neither endpoint nor labels-file is given")
 
 
 def problems(workflows, labels, allow):
@@ -311,8 +353,8 @@ def main(env=os.environ):
     try:
         labels = runner_labels(env, repository)
     except Unavailable as error:
-        print(f"::warning::{error}; the runner labels are not checked")
-        summary(f"Runner labels: not checked, {error}.")
+        print(f"::warning::runner label check skipped: {error}")
+        summary(f"Runner labels: check skipped, {error}.")
         output("checked", "false")
         return 0
     found = problems(workflows, labels, lines(env.get("INPUT_ALLOW", "")))
