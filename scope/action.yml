@@ -8,11 +8,12 @@ inputs:
   jobs:
     description: >-
       JSON object of job ID to its inputs: an array of path globs, or
-      {"paths": [globs], "go": [package patterns]}. Go patterns are relative to
-      go-directory: ./..., ./dir/..., ./dir or ".".
+      {"paths": [globs], "go": [package patterns]}. A "!" glob excludes: a
+      file selects the job when it matches a glob and no "!" glob. Go patterns
+      are relative to go-directory: ./..., ./dir/..., ./dir or ".".
     required: true
   shared:
-    description: "Path globs, one per line, of inputs every job shares (workflows, CI scripts, the toolchain); a change to one runs every job."
+    description: "Path globs, one per line, of inputs every job shares (workflows, CI scripts, the toolchain); a change to one runs every job. A \"!\" glob excludes."
     default: ""
   full:
     description: "true runs every job and package, as a schedule, a workflow_dispatch or a pull request with full-label does."
@@ -22,6 +23,9 @@ inputs:
     default: full-ci
   workflow:
     description: "Workflow file whose green runs on a branch are a push's base. Empty is the running workflow; a called workflow names its own file."
+    default: ""
+  jobs-workflow:
+    description: "Workflow file that defines the job IDs in jobs. Empty is workflow; a reusable workflow whose caller's runs are the history (workflow empty) names its own file here."
     default: ""
   lookback:
     description: "How many of the newest successful runs on the branch to consult for a push's base, from 1 through 100."

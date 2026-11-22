@@ -1,7 +1,7 @@
 'use strict';
 const {test} = require('node:test');
 const assert = require('node:assert/strict');
-const {decideBase, describeBuild, globRegExp, goPattern, parseBuilds, parseConfig, parseOwners, selectJobs, workflowJobs} =
+const {decideBase, describeBuild, globRegExp, goPattern, matcher, parseBuilds, parseConfig, parseOwners, selectJobs, workflowJobs} =
   require('../lib/scope.cjs');
 
 const A = 'a'.repeat(40), B = 'b'.repeat(40), C = 'c'.repeat(40), H = 'd'.repeat(40);
@@ -25,6 +25,23 @@ test('globs: ** spans directories, * and ? stay in one segment, dots match', () 
   for (const bad of ['', '/abs', 'dir/', './a', 'a/../b', 'a//b', 'a**', 'x/**y', 7]) {
     assert.throws(() => globRegExp(bad), /glob|segment/, String(bad));
   }
+});
+
+test('a "!" glob excludes what the other globs include, wherever it appears', () => {
+  // karsto's scopes: karsto/** without the web app, docs, tests and testdata.
+  const karsto = matcher(['karsto/**', '!karsto/web/**', '!**/*.md', '!**/*_test.go', '!**/testdata/**']);
+  for (const file of ['karsto/main.go', 'karsto/pkg/x/y.go']) assert.ok(karsto(file), file);
+  for (const file of ['karsto/web/app.ts', 'karsto/README.md', 'karsto/pkg/x_test.go', 'karsto/pkg/testdata/a.json', 'other/main.go']) {
+    assert.ok(!karsto(file), file);
+  }
+  assert.ok(matcher(['!docs/**', '**'])('src/a.go'), 'order does not matter');
+  assert.ok(!matcher(['!docs/**', '**'])('docs/a.md'));
+  assert.throws(() => matcher(['!**/*.md'], 'job docs'), /job docs has "!" excludes but nothing to include/);
+  assert.throws(() => matcher(['!/abs', 'a']), /glob/);
+  const config = parseConfig(JSON.stringify({go: {paths: ['karsto/**', '!karsto/web/**'], go: ['./...']}}), '.github/**\n!.github/ISSUE_TEMPLATE/**\n');
+  assert.ok(config.jobs[0].paths('karsto/a.go') && !config.jobs[0].paths('karsto/web/a.ts'));
+  assert.ok(config.shared('.github/workflows/ci.yml') && !config.shared('.github/ISSUE_TEMPLATE/bug.md'));
+  assert.throws(() => parseConfig(JSON.stringify({go: {paths: ['!karsto/web/**'], go: ['./...']}}), ''), /job go has "!" excludes/);
 });
 
 test('Go package patterns match package directories', () => {
@@ -351,4 +368,26 @@ test('packaged action loads each go-builds configuration', async t => {
     inputs: {INPUT_JOBS: jobs, 'INPUT_GO-BUILDS': '\nGOOS=windows GOARCH=amd64\n'}});
   assert.deepEqual(JSON.parse(both.outputs['go-packages']), {'.': ['./w']});
   assert.match(both.stdout, /Go package graph: GOOS=windows GOARCH=amd64/);
+});
+
+test('packaged action reads job IDs from jobs-workflow, history from workflow', async t => {
+  const repo = repository(t, {'README.md': 'base\n', 'docs/guide.md': 'guide\n',
+    '.github/workflows/_validation.yml': 'on: workflow_call\njobs:\n  lint:\n  test:\n'}, {'docs/guide.md': 'changed\n'});
+  const pull = {pull_request: {head: {sha: repo.head}, base: {sha: repo.base}, labels: []}};
+  const jobs = JSON.stringify({lint: ['docs/**'], test: ['src/**']});
+  // The caller (the running workflow, ci.yml here) does not define lint.
+  await assert.rejects(runScope(t, repo, {event: 'pull_request', payload: pull, inputs: {INPUT_JOBS: jobs}}),
+    /ci\.yml does not define: lint\n/);
+  const {outputs} = await runScope(t, repo, {event: 'pull_request', payload: pull,
+    inputs: {INPUT_JOBS: jobs, 'INPUT_JOBS-WORKFLOW': '_validation.yml'}});
+  assert.deepEqual(JSON.parse(outputs.jobs), ['lint']);
+  // A push still reads the caller's green runs.
+  const push = await runScope(t, repo, {event: 'push', payload: {},
+    inputs: {INPUT_JOBS: jobs, 'INPUT_JOBS-WORKFLOW': '_validation.yml'},
+    routes: {'/repos/o/r/actions/workflows/ci.yml/runs': {workflow_runs: [
+      {id: 8, conclusion: 'success', head_branch: 'main', event: 'push', head_sha: repo.base,
+        head_repository: {full_name: 'o/r'}, html_url: 'https://github.com/o/r/actions/runs/8'}]}}});
+  assert.equal(push.outputs.base, repo.base);
+  await assert.rejects(runScope(t, repo, {event: 'pull_request', payload: pull,
+    inputs: {INPUT_JOBS: jobs, 'INPUT_JOBS-WORKFLOW': '../x.yml'}}), /jobs-workflow must be a file name/);
 });

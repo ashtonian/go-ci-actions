@@ -414,7 +414,12 @@ changed".
   the job checks every package; `wide-jobs` lists those jobs. A change to any `shared` path (workflow files, CI
   scripts, the files that pin the toolchain) runs every job. Globs are
   repository-relative: `**` as a whole segment spans directories, `*` and `?`
-  stay within a segment, dot files match, everything else is literal.
+  stay within a segment, dot files match, everything else is literal. In a
+  job's `paths`, `shared` and `go-ignore`, a glob starting with `!` excludes:
+  a file matches the list when it matches one of its globs and none of its
+  `!` globs, wherever they appear (dorny/paths-filter's `some-with-excludes`),
+  for example `["karsto/**", "!karsto/web/**", "!**/*.md"]`. A list of only
+  `!` globs fails the step.
 - **Go packages.** When a job names Go package patterns (`./...`, `./dir/...`,
   `./dir`, `.`, relative to `go-directory`), the scope loads the package graph
   of every module in the workspace with `go list -e -test` (with `go-tags`),
@@ -506,7 +511,12 @@ jobs:
 
 Inputs: `jobs` (required), `shared`, `full` (`false`), `full-label`
 (`full-ci`), `workflow` (the workflow file whose green runs are a push's base;
-default the running workflow, and a called workflow names its own file),
+default the running workflow, which in a reusable workflow is its caller),
+`jobs-workflow` (the workflow file that defines the job IDs in `jobs`;
+default `workflow`. A reusable workflow that scopes its own jobs while its
+caller's runs are the trunk history leaves `workflow` empty and names itself
+here; one whose own runs are the history, called by a release, sets
+`workflow` to itself instead),
 `lookback` (20, 1-100), `go-directory` (`.`), `go-tags` (tag sets, one per
 line), `go-builds`,
 `go-ignore`, `go-owners` (JSON, glob to package directories) and `token`
@@ -531,7 +541,7 @@ that exist only under a tag or hold only test files. `go test` and `go vet
 -e` reports a tag-only package's error, and a test-only one has no `GoFiles`). The log lists the
 changed files, each job's decision and why, and the Go packages; the job
 summary repeats the decision. Invalid `jobs`, globs or patterns fail the step,
-and so does a job ID the workflow file does not define (a typo would otherwise
+and so does a job ID `jobs-workflow` does not define (a typo would otherwise
 leave that job never selected).
 
 When a job ran that should not have, or the other way round, read the scope
@@ -643,11 +653,10 @@ and `CI_ARTIFACT_ENDPOINT` (a repository secret). Outputs (verify): `reused`,
 `remaining` (JSON array of the required jobs to run; the scope job's `jobs`
 output is `remaining || scope.jobs`, since verify does not run on pull
 requests), `reason` and `green_base` (`true`, `false`, or empty when unscoped
-or when verify stopped before asking). `green_parent` is a deprecated
-copy of `green_base`, kept for one minor release so v1.8.0 and v1.9.0
-consumers can bump without edits, and removed in v1.11.0. Such a consumer,
-passing no `base`, keeps v1.8.0's green-parent check; passing `base` lets
-path-filtered and called workflows reuse.
+or when verify stopped before asking). v1.10.0's `green_parent`, a
+deprecated copy of `green_base`, is gone; read `green_base`. A consumer that
+passes no `base` keeps v1.8.0's check on the merge's parent; passing `base`
+lets path-filtered and called workflows reuse.
 
 The receipt proves only what the run's own validation proved. Possession of
 an archive is not trusted on its own: the run lookup, its conclusion and the

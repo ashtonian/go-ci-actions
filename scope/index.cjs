@@ -84,17 +84,23 @@ async function main() {
   const forceFull = input('full') === 'true';
   const lookback = Number(input('lookback') || '20');
   if (!Number.isInteger(lookback) || lookback < 1 || lookback > 100) throw new Error('lookback must be from 1 through 100');
-  const ignore = matcher(lines(input('go-ignore')));
+  const ignore = matcher(lines(input('go-ignore')), 'go-ignore');
   const owners = parseOwners(input('go-owners'));
   const builds = parseBuilds(input('go-builds'), input('go-tags'));
   const payload = JSON.parse(fs.readFileSync(env.GITHUB_EVENT_PATH, 'utf8'));
   const token = input('token');
   const get = github(env, token);
   const workflow = input('workflow') || workflowFile(env);
-  if (!/^[A-Za-z0-9._-]+\.ya?ml$/.test(workflow)) throw new Error('workflow must be a file name under .github/workflows');
-  const defined = workflowJobs(fs.readFileSync(path.join(env.GITHUB_WORKSPACE, '.github', 'workflows', workflow), 'utf8'));
+  // The jobs live in jobsWorkflow, which differs from workflow when a
+  // reusable workflow scopes its own jobs but its caller's runs are the
+  // trunk history.
+  const jobsWorkflow = input('jobs-workflow') || workflow;
+  for (const [name, file] of [['workflow', workflow], ['jobs-workflow', jobsWorkflow]]) {
+    if (!/^[A-Za-z0-9._-]+\.ya?ml$/.test(file)) throw new Error(name + ' must be a file name under .github/workflows');
+  }
+  const defined = workflowJobs(fs.readFileSync(path.join(env.GITHUB_WORKSPACE, '.github', 'workflows', jobsWorkflow), 'utf8'));
   const unknown = config.jobs.map(job => job.id).filter(id => !defined.has(id));
-  if (unknown.length) throw new Error('jobs names IDs ' + workflow + ' does not define: ' + unknown.join(', '));
+  if (unknown.length) throw new Error('jobs names IDs ' + jobsWorkflow + ' does not define: ' + unknown.join(', '));
   const head = headCommit();
   const runsOf = async (file, branch) => (await get('actions/workflows/' + encodeURIComponent(file) + '/runs',
     {branch, status: 'success', exclude_pull_requests: 'true', per_page: String(lookback)})).workflow_runs;
