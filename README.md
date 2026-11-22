@@ -161,6 +161,37 @@ whichever registry served the tarball. A malformed endpoint fails the step.
 
 Output: `registry` (the cache URL in use, or empty).
 
+## Native multi-arch builder
+
+`ashtonian/go-ci-actions/buildx-native@FULL_COMMIT_SHA` selects a buildx
+builder with one native node per architecture for the rest of the job:
+linux/amd64 on a BuildKit started in the job's own Docker daemon, and
+linux/arm64 on a remote arm64 BuildKit reached over mutual TLS. A
+multi-platform `docker buildx build` (or GoReleaser, or
+docker/build-push-action) then runs each platform's `RUN` steps on its own CPU,
+with no QEMU. Runners that cannot register binfmt handlers need this for any
+arm64 image whose build executes arm64 code.
+
+The runner supplies the arm64 BuildKit, as it supplies the build cache:
+`BUILDKIT_ARM64_ENDPOINT` (`tcp://host:port`) and `BUILDKIT_ARM64_TLS_DIR`
+(a directory holding `ca.crt`, `tls.crt` and `tls.key`). The `arm64-endpoint`
+and `arm64-tls-dir` inputs override them. The TLS server name is the
+endpoint's host. The action fails before creating anything when either is
+missing or a certificate file is unreadable, so a runner without the client
+certificate reports that instead of a later TLS error.
+
+```yaml
+- uses: ashtonian/go-ci-actions/buildx-native@FULL_COMMIT_SHA
+- run: docker buildx build --platform linux/amd64,linux/arm64 .
+```
+
+Output: `name`, the builder, which is also the job's current builder. The
+action sets `BUILDX_CONFIG` to an empty directory for the rest of the job: the
+remote driver refuses a BuildKit config file, and later buildx calls read the
+selection from there. Use it once per job. A Dockerfile that cross-compiles in
+`$BUILDPLATFORM` stages should keep a single amd64 builder, because on this
+builder its compile stage would run on the arm64 node.
+
 ## Ownership and validation
 
 This repository owns toolchain/cache policy. Consumers own build/test commands.
