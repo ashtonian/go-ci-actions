@@ -63,6 +63,8 @@ outputs:
     description: "JSON array of the job IDs that run, in jobs order."
   wide-jobs:
     description: "JSON array of the selected jobs that check every package, not only the affected ones: a full run, a shared change, or one of the job's own paths changed."
+  selections:
+    description: 'JSON object of each selected job ID to what it checks: the affected Go packages its patterns match, as import paths, or "all". Pass it to acceptance record and verify, so a push reuses a job only when the pull request checked at least as much.'
   base:
     description: "The commit the change is measured from; empty for a full run."
   files:

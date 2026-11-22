@@ -1,8 +1,8 @@
 'use strict';
 const {test} = require('node:test');
 const assert = require('node:assert/strict');
-const {decideBase, describeBuild, globRegExp, goPattern, matcher, parseBuilds, parseConfig, parseOwners, selectJobs, workflowJobs} =
-  require('../lib/scope.cjs');
+const {decideBase, describeBuild, globRegExp, goPattern, jobSelections, matcher, parseBuilds, parseConfig, parseOwners, selectJobs,
+  workflowJobs} = require('../lib/scope.cjs');
 
 const A = 'a'.repeat(40), B = 'b'.repeat(40), C = 'c'.repeat(40), H = 'd'.repeat(40);
 
@@ -42,6 +42,24 @@ test('a "!" glob excludes what the other globs include, wherever it appears', ()
   assert.ok(config.jobs[0].paths('karsto/a.go') && !config.jobs[0].paths('karsto/web/a.ts'));
   assert.ok(config.shared('.github/workflows/ci.yml') && !config.shared('.github/ISSUE_TEMPLATE/bug.md'));
   assert.throws(() => parseConfig(JSON.stringify({go: {paths: ['!karsto/web/**'], go: ['./...']}}), ''), /job go has "!" excludes/);
+});
+
+test('each selected job records what it checks', () => {
+  const config = parseConfig(JSON.stringify({
+    docs: ['docs/**'], test: {go: ['./...']}, image: {paths: ['Dockerfile'], go: ['./cmd/app']}, conformance: {go: ['./conformance/...']},
+  }), '.github/**');
+  const go = {full: false, reason: 'x', dirs: ['./a', './cmd/app'],
+    packages: [{importPath: 'example.com/m/a', dir: './a'}, {importPath: 'example.com/m/cmd/app', dir: './cmd/app'}]};
+  const files = ['docs/x.md', 'a/a.go'];
+  assert.deepEqual(jobSelections(config, selectJobs(config, {full: false, files, go}), go),
+    {docs: 'all', test: ['example.com/m/a', 'example.com/m/cmd/app'], image: ['example.com/m/cmd/app']});
+  const own = selectJobs(config, {full: false, files: ['Dockerfile'], go: {...go, dirs: [], packages: []}});
+  assert.deepEqual(jobSelections(config, own, {...go, dirs: [], packages: []}), {image: 'all'}, 'its own paths widen it');
+  const everything = {full: true, reason: 'manifest', dirs: [], packages: []};
+  assert.deepEqual(jobSelections(config, selectJobs(config, {full: false, files: ['a/a.go'], go: everything}), everything),
+    {test: 'all', image: 'all', conformance: 'all'});
+  assert.deepEqual(jobSelections(config, selectJobs(config, {full: true, files: [], go: null}), null),
+    {docs: 'all', test: 'all', image: 'all', conformance: 'all'});
 });
 
 test('Go package patterns match package directories', () => {
@@ -335,6 +353,7 @@ test('packaged action narrows Go jobs to the affected packages', async t => {
     inputs: {INPUT_JOBS: JSON.stringify(jobs), 'INPUT_GO-IGNORE': 'docs/**\n'}});
   assert.deepEqual(JSON.parse(outputs.jobs), ['test', 'docs']);
   assert.deepEqual(JSON.parse(outputs['wide-jobs']), ['docs']);
+  assert.deepEqual(JSON.parse(outputs.selections), {test: ['example.com/m/a', 'example.com/m/b'], docs: 'all'});
   assert.deepEqual(JSON.parse(outputs['go-packages']), {'.': ['./a', './b']});
   assert.equal(outputs['go-args'], 'example.com/m/a example.com/m/b');
   const unignored = await runScope(t, repo, {event: 'pull_request',

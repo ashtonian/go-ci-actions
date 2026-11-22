@@ -5,8 +5,8 @@ const os = require('node:os');
 const path = require('node:path');
 const {input, output} = require('../lib/policy.cjs');
 const {github, workflowFile} = require('../lib/history.cjs');
-const {SHA, decideBase, describeBuild, lines, matcher, parseBuilds, parseConfig, parseOwners, selectJobs, workflowJobs} =
-  require('../lib/scope.cjs');
+const {SHA, decideBase, describeBuild, jobSelections, lines, matcher, parseBuilds, parseConfig, parseOwners, selectJobs,
+  workflowJobs} = require('../lib/scope.cjs');
 const {LIST_FIELDS, affectedPackages, byModule, importArgs, parseStream, rootDirs} = require('../lib/goaffected.cjs');
 const GIT_TIMEOUT_MS = 120000;
 const GO_TIMEOUT_MS = 600000;
@@ -130,8 +130,9 @@ async function main() {
   if (config.jobs.some(job => job.usesGo)) {
     const scoped = goScope({full: decision.full, sharedFull, files, workspace: env.GITHUB_WORKSPACE,
       directory: input('go-directory') || '.', builds, ignore, owners});
-    goResult = {full: scoped.result.full, reason: scoped.result.reason,
-      dirs: scoped.result.full ? [] : rootDirs(scoped.root, scoped.result)};
+    const dirs = scoped.result.full ? [] : rootDirs(scoped.root, scoped.result);
+    goResult = {full: scoped.result.full, reason: scoped.result.reason, dirs,
+      packages: scoped.result.full ? [] : scoped.result.packages.map((pkg, index) => ({importPath: pkg.importPath, dir: dirs[index]}))};
     goPackages = byModule(scoped.root, scoped.modules, scoped.result);
     goArgs = importArgs(scoped.modules, scoped.result).join(' ');
   }
@@ -146,6 +147,7 @@ async function main() {
   output('full', String(decision.full || Boolean(selection.shared)));
   output('jobs', JSON.stringify(selection.jobs));
   output('wide-jobs', JSON.stringify(selection.wide));
+  output('selections', JSON.stringify(jobSelections(config, selection, goResult)));
   output('base', decision.full ? '' : decision.base);
   output('files', filesPath);
   output('reason', reason);
