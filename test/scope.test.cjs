@@ -149,6 +149,8 @@ test('a push is measured from the newest green run on its branch', async () => {
     greenRun(7, {event: 'pull_request'}),
     greenRun(6, {head_repository: {full_name: 'fork/r'}}),
     greenRun(5, {conclusion: 'failure'}),
+    greenRun(51, {event: 'workflow_dispatch'}),
+    greenRun(52, {event: 'merge_group'}),
     greenRun(4, {head_sha: B, event: 'schedule'}),
     greenRun(3),
   ];
@@ -156,7 +158,7 @@ test('a push is measured from the newest green run on its branch', async () => {
   const result = await base('push', {}, {greenRuns: async branch => { asked = branch; return runs; }});
   assert.equal(asked, 'main');
   assert.equal(result.full, false);
-  assert.equal(result.base, B, 'the current run, other branches, pull requests, forks and failures are passed over');
+  assert.equal(result.base, B, 'the current run, other branches, pull requests, forks, failures and dispatched runs are passed over');
   assert.match(result.reason, /runs\/4$/);
   assert.equal((await base('push', {}, {greenRuns: async () => []})).full, true);
   assert.equal((await base('push', {}, {env: {GITHUB_REF: 'refs/tags/v1'}})).full, true);
