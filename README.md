@@ -12,10 +12,10 @@ immutable version tags identify releases.
 ## Interface
 
 Optional inputs: go-version (empty), go-version-file (go.mod), check-latest
-(false), workload (empty), cache-dependency-path (all go.mod/go.sum/go.work/
-go.work.sum files), cache-mode (read-write), cache-key-prefix (go-v1),
-seed-from-other-workloads (true), max-staleness-hours (2),
-build-cache-backend (auto) and module-proxy (auto).
+(false), workload (empty), cache-dependency-path (empty: the manifests under
+go-version-file's directory, see Policy), cache-mode (read-write),
+cache-key-prefix (go-v1), seed-from-other-workloads (true),
+max-staleness-hours (2), build-cache-backend (auto) and module-proxy (auto).
 
 Set cache-mode to read-only to restore without pruning or saving; off installs
 Go without restoring or saving caches. Include matrix variants, build flags and
@@ -25,8 +25,9 @@ environment-dependent checks in caller workflows.
 
 Outputs: go-version, actual-toolchain, build-cache-backend (github, remote or
 off), module-proxy (the runner proxy in use, or empty), cache-primary-key
-(empty when nothing is archived), cache-matched-key, cache-hit. A prefix
-restore provides reuse even when cache-hit is false.
+(empty when nothing is archived, which includes cache-mode off),
+cache-matched-key, cache-hit. A prefix restore provides reuse even when
+cache-hit is false.
 
 ## Policy
 
@@ -35,6 +36,19 @@ workflow/job/workload, manifests, run ID and run attempt. Successful jobs save
 fresh state. Restore order is same workload/manifests, same workload with older
 manifests, then a compatible compiler seed when enabled. GitHub enforces branch
 and repository cache scope; sharing action code does not share cached contents.
+
+The manifest digest is computed only when something is archived (see the table
+under Module proxy); a job whose build objects and modules both come from the
+runner reads no manifests at all. With cache-dependency-path empty it covers
+every go.mod, go.sum, go.work and go.work.sum under the directory holding
+go-version-file, so sibling checkouts elsewhere in the workspace neither slow
+setup nor change the key; with the default go-version-file that directory is
+the workspace root. Explicit patterns are relative to the workspace, one per
+line, `!` excludes matches and `#` starts a comment. Either way `**` does not
+enter dot-directories or symlinked directories, `node_modules` is skipped, and
+a pattern or go-version-file outside the workspace fails setup. The digest is a
+SHA-256 over each matched file's SHA-256 in sorted path order; no match gives
+an empty digest. The identity step logs how many manifests it hashed.
 
 Before successful post-save, build objects unused since setup began are pruned
 with two hours of slack for Go's mtime-touch granularity. Long jobs retain
@@ -175,9 +189,13 @@ plugin environment and modules-only archive, a ready module proxy's GOPROXY and
 build-only archive, and the fallback when the proxy does not answer. A real
 job-container check uses Karsto's pinned Playwright runtime to verify remote
 object reuse from fresh local directories, and that a module proxy the runner
-bundle declares is the one in use. Policy tests cover reruns,
-invalid inputs, safe pruning, long-running jobs, backend selection, and the npm
-registry cache's selection, precedence and health paths. No npm dependencies.
+bundle declares is the one in use. The remote contract also checks that the
+module archive key hashes only the manifests under go-version-file's
+directory, and the disabled contract that off mode has no key. Policy tests
+cover reruns, invalid inputs, safe pruning, long-running jobs, backend
+selection, manifest scoping and patterns, skipping the digest when nothing is
+archived, and the npm registry cache's selection, precedence and health paths.
+No npm dependencies.
 
 Release signed commits with immutable version tags. Upgrade consumers through
 reviewed SHA changes and roll back to the previous SHA. Measure cold, warm,

@@ -110,8 +110,10 @@ jobs:
           cache-mode: off
       - env:
           MATCHED: ${{ steps.go.outputs.cache-matched-key }}
+          KEY: ${{ steps.go.outputs.cache-primary-key }}
         run: |
           test -z "$MATCHED"
+          test -z "$KEY"
           test ! -e "$GOCACHE/contract-sentinel"
   warm:
     needs: [seed, restore]
@@ -139,7 +141,8 @@ jobs:
           test -f "$GOCACHE/contract-sentinel"
           test ! -e "$GOCACHE/contract-stale"
   # A runner that provides a remote build cache: GOCACHEPROG_REMOTE_URL and
-  # gocacheprog on PATH. The stub plugin is never started.
+  # gocacheprog on PATH. The stub plugin is never started. The module archive
+  # key hashes only the manifests under go-version-file's directory.
   remote:
     if: github.actor == 'ashtonian' && (github.event_name != 'pull_request' || github.event.pull_request.user.login == 'ashtonian')
     runs-on: arc-go-ci-actions
@@ -158,10 +161,14 @@ jobs:
           printf '#!/bin/sh\nexit 1\n' > "$RUNNER_TEMP/plugin-bin/gocacheprog"
           chmod +x "$RUNNER_TEMP/plugin-bin/gocacheprog"
           echo "$RUNNER_TEMP/plugin-bin" >> "$GITHUB_PATH"
+      - name: Add a sibling checkout outside the module
+        run: |
+          mkdir -p sibling
+          echo 'module example.com/sibling' > sibling/go.mod
       - uses: ./
         id: go
         with:
-          go-version: "1.26.10"
+          go-version-file: fixtures/go.work
           module-proxy: "off"
           cache-key-prefix: remote-probe-${{ github.run_id }}-${{ github.run_attempt }}
       - name: Assert the plugin owns the build cache
@@ -173,6 +180,12 @@ jobs:
           test "$GOCACHEPROG" = "$RUNNER_TEMP/plugin-bin/gocacheprog"
           test "$GOCACHEPROG_DIR" = "$RUNNER_TEMP/gocacheprog"
           case "$KEY" in remote-probe-*-mod-*) ;; *) echo "unexpected key $KEY"; exit 1 ;; esac
+          fixtures=$(python3 -c 'import hashlib, sys
+          digest = hashlib.sha256()
+          for name in sys.argv[1:]:
+              digest.update(hashlib.sha256(open(name, "rb").read()).digest())
+          print(digest.hexdigest())' fixtures/go.mod fixtures/go.work fixtures/leaf/go.mod)
+          case "$KEY" in *-"$fixtures") ;; *) echo "key $KEY does not hash the fixtures manifests alone"; exit 1 ;; esac
           mkdir -p "$GOMODCACHE"
           echo module > "$GOMODCACHE/remote-sentinel"
   # A runner that provides a ready module proxy: modules stay out of the

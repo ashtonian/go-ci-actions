@@ -7,8 +7,10 @@ inputs:
     description: Job identifier.
   workload:
     description: Additional workload.
-  dependency-hash:
-    description: Manifest hash.
+  cache-dependency-path:
+    description: Manifest patterns relative to the workspace; empty means the manifests under go-version-file's directory.
+  go-version-file:
+    description: Go version file relative to the workspace.
   os:
     description: Runner OS.
   arch:
