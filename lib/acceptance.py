@@ -38,8 +38,10 @@ LOOKUP_DEADLINE = 100
 RECEIPT_RETENTION_DAYS = 7
 WORKFLOW_PATH = re.compile(r"\.github/workflows/[A-Za-z0-9._-]+\.ya?ml")
 JOB_ID = re.compile(r"[A-Za-z_][A-Za-z0-9_-]*")
-# Events whose successful runs on the default branch prove a commit green.
-TRUNK_EVENTS = {"push", "schedule", "workflow_dispatch", "merge_group"}
+# Events whose successful runs on the default branch prove a commit green: a
+# push runs the scope measured from a green base, a schedule runs everything.
+# A workflow_dispatch can narrow its work through inputs the scope never sees.
+TRUNK_EVENTS = {"push", "schedule"}
 
 
 def commit(ref="HEAD"):
@@ -152,11 +154,18 @@ def job_selections():
 
 
 def covers(recorded, needed):
-    """Whether a pull request's selection for a job checked all a push's selection needs."""
+    """Whether a pull request's selection for a job checked all a push's selection needs.
+
+    No recorded entry is no evidence: the job may have run in a reduced mode
+    the scope did not select (lint only, say), so it covers only an empty
+    selection.
+    """
     if recorded == "all":
         return True
-    if recorded is None or needed is None or needed == "all":
+    if needed == "all":
         return False
+    if recorded is None:
+        return not needed
     return set(needed) <= set(recorded)
 
 

@@ -284,10 +284,13 @@ class AcceptanceTests(unittest.TestCase):
                 self.assertIs(self.verdict.green_base, False)
                 self.assertIn("has no green run of ci.yml", reason)
                 self.assertEqual(len(api.calls), 1, "no pull request lookup on a red base")
-        for event in ("schedule", "workflow_dispatch"):
+        (reused, reason), _ = self.verify(trunk=[self.trunk_run(event="schedule")])
+        self.assertTrue(reused, reason)
+        # A dispatch can run a reduced subset through its inputs.
+        for event in ("workflow_dispatch", "merge_group"):
             with self.subTest(event=event):
                 (reused, reason), _ = self.verify(trunk=[self.trunk_run(event=event)])
-                self.assertTrue(reused, reason)
+                self.assertFalse(reused, reason)
 
     def test_a_green_base_older_than_the_parent_reuses(self):
         green = "6" * 40
@@ -361,6 +364,21 @@ class AcceptanceTests(unittest.TestCase):
                     (reused, reason), _ = self.verify(receipt=receipt)
                 self.assertEqual(self.verdict.remaining, remaining, reason)
                 self.assertEqual(reused, not remaining)
+
+    def test_a_reduced_run_the_scope_did_not_select_satisfies_nothing(self):
+        # foundry and pkg run check lint-only on a pull request whose scope did
+        # not select it: the receipt shows check passed with no selection.
+        results = json.dumps({"check": {"result": "success"}, "lint": {"result": "success"}})
+        with patch.dict(os.environ, {"INPUT_RESULTS": results, "INPUT_SELECTIONS": json.dumps({"lint": "all"})}):
+            receipt = self.receipt()
+        self.assertEqual(receipt["passed"], ["check", "lint"])
+        for needed in ("all", ["example.com/m/a"]):
+            with self.subTest(needed=needed), patch.dict(os.environ, {"INPUT_REQUIRED": '["check", "lint"]',
+                                                                       "INPUT_SELECTIONS": json.dumps({"check": needed, "lint": "all"})}):
+                (reused, reason), _ = self.verify(receipt=receipt)
+                self.assertFalse(reused, reason)
+                self.assertEqual(self.verdict.remaining, ["check"])
+        self.assertTrue(acceptance.covers(None, []), "an empty selection needs no evidence")
 
     def test_invalid_selections_fail_the_step(self):
         for selections in ('["go"]', '{"go": "some"}', '{"go": [1]}', '{"bad id": "all"}', "{not json"):
