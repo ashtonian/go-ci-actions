@@ -35,6 +35,13 @@ inputs:
   go-ignore:
     description: "Path globs, one per line, of changed files that affect no Go package (documentation). Any other file no package owns affects every package."
     default: ""
+  go-owners:
+    description: >-
+      JSON object of path glob to the Go package directories (relative to
+      go-directory, "." or "./a") whose code reads matching files at run time,
+      such as a test reading ../../docs/*.md; a change to one affects those
+      packages as well as the one holding it.
+    default: ""
   token:
     description: "Token that can read Actions runs (actions: read) and the repository (contents: read)."
     default: ${{ github.token }}

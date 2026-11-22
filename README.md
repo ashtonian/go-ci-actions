@@ -248,12 +248,16 @@ changed".
   plus every package whose build or tests depend on one, across modules. A
   file belongs to the package of its directory, of an ancestor whose
   `testdata` tree holds it, or that embeds it. A package that fails to load is
-  always affected; one whose files the tags exclude is not broken. Every
-  package is affected when a module's go.mod or go.sum, go.work or
-  go.work.sum changes, when a removed Go file leaves no package behind, when
-  `go list` fails, or when a changed file outside `go-ignore` belongs to no
-  package: list documentation and other files no Go code reads in
-  `go-ignore`, never code inputs.
+  always affected; one whose files the tags exclude is not broken. A test
+  that reads a file outside its package at run time (`../../docs/*.md`)
+  declares it in `go-owners`, which maps a glob to the package directories
+  that read it; a change to such a file affects them too. Every package is
+  affected when a module's go.mod or go.sum, go.work or go.work.sum changes,
+  when a removed Go file leaves no package behind, when `go list` fails, or
+  when a changed file outside `go-ignore` belongs to no package and no
+  `go-owners` entry: list documentation and other files no Go code reads in
+  `go-ignore`, never code inputs. Grep the tests for `ReadFile`, `Open` and
+  `Glob` of relative paths before narrowing either list.
 
 The job IDs in `jobs` are the workflow's job IDs, and the jobs gate on the
 scope job's output with `contains(needs.scope.outputs.jobs, '"<id>"')` (a
@@ -313,7 +317,8 @@ jobs:
 Inputs: `jobs` (required), `shared`, `full` (`false`), `full-label`
 (`full-ci`), `workflow` (the workflow file whose green runs are a push's base;
 default the running workflow, and a called workflow names its own file),
-`lookback` (20, 1-100), `go-directory` (`.`), `go-tags`, `go-ignore` and `token`
+`lookback` (20, 1-100), `go-directory` (`.`), `go-tags`, `go-ignore`,
+`go-owners` (JSON, glob to package directories) and `token`
 (`github.token`; needs `actions: read` for a push and `contents: read`).
 Outputs: `full` (`true` when every job and package is in scope), `jobs` (JSON
 array of the selected job IDs, in `jobs` order), `wide-jobs` (the selected

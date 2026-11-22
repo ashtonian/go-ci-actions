@@ -5,7 +5,7 @@ const os = require('node:os');
 const path = require('node:path');
 const {input, output} = require('../lib/policy.cjs');
 const {github, workflowFile} = require('../lib/history.cjs');
-const {SHA, decideBase, lines, matcher, parseConfig, selectJobs} = require('../lib/scope.cjs');
+const {SHA, decideBase, lines, matcher, parseConfig, parseOwners, selectJobs} = require('../lib/scope.cjs');
 const {LIST_FIELDS, affectedPackages, byModule, parseStream, rootDirs} = require('../lib/goaffected.cjs');
 const GIT_TIMEOUT_MS = 120000;
 const GO_TIMEOUT_MS = 600000;
@@ -42,7 +42,7 @@ function go(args, cwd) {
 }
 // The affected Go packages for the changed files outside go-ignore, or every
 // package when the change set is unknown (a full run, a shared input).
-function goScope({full, sharedFull, files, workspace: given, directory, tags, ignore}) {
+function goScope({full, sharedFull, files, workspace: given, directory, tags, ignore, owners}) {
   // go list reports resolved directories.
   const workspace = fs.realpathSync(given);
   const root = path.resolve(workspace, directory);
@@ -65,7 +65,10 @@ function goScope({full, sharedFull, files, workspace: given, directory, tags, ig
     console.log('::warning::go list could not load the packages, so every package is affected: ' + detail);
     return {root, modules, result: {full: true, reason: 'go list failed'}};
   }
-  return {root, modules, result: affectedPackages({root, modules, entries, changed: considered, exists: fs.existsSync})};
+  const ownersOf = file => owners(path.relative(workspace, file).split(path.sep).join('/'))
+    .map(dir => path.resolve(root, dir));
+  return {root, modules, result: affectedPackages({root, modules, entries, changed: considered, exists: fs.existsSync,
+    owners: ownersOf})};
 }
 function summary(lines) {
   if (process.env.GITHUB_STEP_SUMMARY) fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, lines.join('\n') + '\n');
@@ -78,6 +81,7 @@ async function main() {
   const lookback = Number(input('lookback') || '20');
   if (!Number.isInteger(lookback) || lookback < 1 || lookback > 100) throw new Error('lookback must be from 1 through 100');
   const ignore = matcher(lines(input('go-ignore')));
+  const owners = parseOwners(input('go-owners'));
   const payload = JSON.parse(fs.readFileSync(env.GITHUB_EVENT_PATH, 'utf8'));
   const token = input('token');
   const get = github(env, token);
@@ -109,7 +113,7 @@ async function main() {
   let goResult = null, goPackages = {};
   if (config.jobs.some(job => job.usesGo)) {
     const scoped = goScope({full: decision.full, sharedFull, files, workspace: env.GITHUB_WORKSPACE,
-      directory: input('go-directory') || '.', tags: input('go-tags'), ignore});
+      directory: input('go-directory') || '.', tags: input('go-tags'), ignore, owners});
     goResult = {full: scoped.result.full, reason: scoped.result.reason,
       dirs: scoped.result.full ? [] : rootDirs(scoped.root, scoped.result)};
     goPackages = byModule(scoped.root, scoped.modules, scoped.result);

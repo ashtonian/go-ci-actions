@@ -53,9 +53,9 @@ function list(root, tags = '') {
     ...modules.map(module => module.Path + '/...')]);
   return {modules, entries};
 }
-function affected(root, files, {tags = '', exists = fs.existsSync} = {}) {
+function affected(root, files, {tags = '', exists = fs.existsSync, owners} = {}) {
   const {modules, entries} = list(root, tags);
-  const result = affectedPackages({root, modules, entries, changed: files.map(file => path.join(root, file)), exists});
+  const result = affectedPackages({root, modules, entries, changed: files.map(file => path.join(root, file)), exists, owners});
   return {result, modules: byModule(root, modules, result), dirs: result.full ? [] : rootDirs(root, result)};
 }
 
@@ -109,4 +109,13 @@ test('a package that does not load is always affected', needsGo, t => {
   const root = workspace(t);
   fs.writeFileSync(path.join(root, 'tool/tool.go'), 'package tool\n\nimport _ "example.com/missing"\n');
   assert.deepEqual(affected(root, ['lib/sub/sub.go']).modules, {app: ['.'], lib: ['./sub'], tool: ['.']});
+});
+
+test('declared owners make a file outside every package affect the packages that read it', needsGo, t => {
+  const root = workspace(t);
+  const owners = file => (file === path.join(root, 'docs/guide.md') ? [path.join(root, 'tool')] :
+    file === path.join(root, 'lib/README.md') ? [path.join(root, 'app')] : []);
+  assert.deepEqual(affected(root, ['docs/guide.md'], {owners}).modules, {tool: ['.']});
+  assert.deepEqual(affected(root, ['lib/README.md'], {owners}).modules, {app: ['.'], lib: ['.']}, 'in addition to its own package');
+  assert.throws(() => affected(root, ['docs/guide.md'], {owners: () => [path.join(root, 'nowhere')]}), /go-owners names nowhere/);
 });

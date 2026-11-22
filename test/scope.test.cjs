@@ -1,7 +1,7 @@
 'use strict';
 const {test} = require('node:test');
 const assert = require('node:assert/strict');
-const {decideBase, globRegExp, goPattern, parseConfig, selectJobs} = require('../lib/scope.cjs');
+const {decideBase, globRegExp, goPattern, parseConfig, parseOwners, selectJobs} = require('../lib/scope.cjs');
 
 const A = 'a'.repeat(40), B = 'b'.repeat(40), C = 'c'.repeat(40), H = 'd'.repeat(40);
 
@@ -43,6 +43,17 @@ test('the configuration is validated', () => {
   for (const raw of ['', '[]', '{}', 'nope', '{"bad id": ["a"]}', '{"a": []}', '{"a": {"paths": []}}',
     '{"a": {"other": ["x"]}}', '{"a": "x"}', '{"a": ["/abs"]}', '{"a": {"go": ["cmd"]}}']) {
     assert.throws(() => parseConfig(raw, ''), Error, raw);
+  }
+});
+
+test('go-owners maps globs to the packages that read them', () => {
+  const owners = parseOwners('{"docs/*.md": [".", "./examples/readme"], "README.md": ["./examples/readme"]}');
+  assert.deepEqual(owners('docs/guide.md'), ['.', './examples/readme']);
+  assert.deepEqual(owners('README.md'), ['./examples/readme']);
+  assert.deepEqual(owners('docs/x/y.md'), []);
+  assert.deepEqual(parseOwners('')('a'), []);
+  for (const raw of ['[]', 'x', '{"a": []}', '{"a": ["./..."]}', '{"a": ["dir"]}', '{"/a": ["."]}', '{"a": "."}']) {
+    assert.throws(() => parseOwners(raw), Error, raw);
   }
 });
 
