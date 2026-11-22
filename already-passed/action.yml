@@ -1,0 +1,29 @@
+name: already-passed
+description: >-
+  Whether the named jobs already passed on this commit in an earlier run of the
+  same workflow, event and branch, so a scheduled run can skip work that has
+  nothing new to check.
+inputs:
+  jobs:
+    description: "Job names, one per line; a name also covers its matrix variants, \"name (variant)\"."
+    required: true
+  event:
+    description: "Event of the earlier runs to consult."
+    default: ${{ github.event_name }}
+  branch:
+    description: "Branch of the earlier runs to consult."
+    default: ${{ github.ref_name }}
+  lookback:
+    description: "How many earlier completed runs to consult, from 1 through 50."
+    default: "10"
+  token:
+    description: "Token that can read Actions runs (actions: read)."
+    default: ${{ github.token }}
+outputs:
+  passed:
+    description: "true when the newest earlier run on this commit that ran the jobs passed them all; false otherwise."
+  reason:
+    description: "Why."
+runs:
+  using: node24
+  main: index.cjs

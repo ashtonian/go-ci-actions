@@ -294,6 +294,49 @@ merge was not a merge commit of a tested head, `older than the receipt
 lifetime` means the pull request sat longer than `max-age-hours`, and an
 `acceptance evidence unavailable` reason names the API or gateway error.
 
+## Unchanged scheduled runs
+
+`ashtonian/go-ci-actions/already-passed@FULL_COMMIT_SHA` tells a scheduled
+workflow whether named jobs already passed on this commit, so a nightly can
+skip a soak or a long suite that has nothing new to check while its other jobs
+still run (model tests with new seeds, say).
+
+It lists up to `lookback` (10) earlier completed runs of the running workflow
+file for the same `event` (default the current one) and `branch` (default the
+current ref), newest first, excluding the running run. The first run on
+another commit ends the search with `passed=false`: the jobs have something new
+to check. A run that skipped every named job is passed over. Otherwise the
+newest run that ran them decides: `passed=true` only when every matching job
+succeeded, so a failure on this commit runs them again the next time. A name
+covers the job of that name and its matrix variants, `name (variant)`. An API
+error gives `passed=false` with a notice: missing evidence never skips work.
+After `lookback` runs that all skipped the jobs, they run again, which bounds
+how long an unchanged commit goes without them.
+
+```yaml
+jobs:
+  history:
+    runs-on: <runner>
+    permissions: {actions: read}
+    outputs:
+      passed: ${{ steps.soak.outputs.passed }}
+    steps:
+      - id: soak
+        if: github.event_name == 'schedule'
+        uses: ashtonian/go-ci-actions/already-passed@FULL_COMMIT_SHA
+        with:
+          jobs: soak
+  soak:
+    needs: history
+    if: ${{ !cancelled() && needs.history.outputs.passed != 'true' }}
+    ...
+```
+
+Inputs: `jobs` (required, one per line), `event`, `branch`, `lookback` (1-50)
+and `token` (`github.token`; needs `actions: read`). Outputs: `passed` and
+`reason`, which the log repeats. It makes at most `lookback + 1` API calls,
+each with a 10-second timeout.
+
 ## Ownership and validation
 
 This repository owns toolchain/cache policy. Consumers own build/test commands.
@@ -318,7 +361,9 @@ precedence and health paths. No npm dependencies. `test/acceptance_test.py`
 (`python3 -m unittest discover -s test -p acceptance_test.py`) checks that a
 receipt is recorded only for a passing same-repository pull request merge
 commit and that verify reuses validation only for a matching receipt, against
-a real Git merge fixture; the smoke job runs it.
+a real Git merge fixture; the smoke job runs it. The history tests cover
+already-passed's decision over earlier runs and the packaged action against a
+stub API.
 
 Release signed commits with immutable version tags. Upgrade consumers through
 reviewed SHA changes and roll back to the previous SHA. Measure cold, warm,
