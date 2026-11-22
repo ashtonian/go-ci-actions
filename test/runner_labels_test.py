@@ -42,6 +42,8 @@ jobs:
     runs-on: {group: arc}
   flowscalar:
     runs-on: {labels: arc-gone-flowscalar, group: "a, b"}
+  quotedmap:
+    runs-on: {group: "x, y", labels: "${{ vars.R || 'arc-gone-quotedmap' }}"}
   paren:
     runs-on: ${{ (vars.LARGE && 'arc-gone-paren') || 'arc-live' }}
   fallback:
@@ -117,7 +119,7 @@ class LabelTests(Workflows):
         self.assertEqual(gone, {"arc-gone-default", "arc-gone-flow", "arc-gone-block", "arc-gone-group",
                                 "arc-gone-fallback", "arc-gone-choice", "arc-gone-matrix", "arc-gone-include",
                                 "arc-gone-json", "arc-gone-call", "arc-gone-flowmap", "arc-gone-flowscalar",
-                                "arc-gone-paren"})
+                                "arc-gone-paren", "arc-gone-quotedmap"})
         self.assertNotIn("push", found, "a comparison operand is no label")
         self.assertFalse(any(label.startswith(("{", "group")) for label in found), "a flow mapping is no label")
         self.assertNotIn("arc-not-a-runner", found, "only runner inputs name runners")
@@ -128,7 +130,7 @@ class LabelTests(Workflows):
         file.write_text(json.dumps({"labels": ["arc-live"]}))
         code, out = self.run_main(labels_file=str(file))
         self.assertEqual(code, 1)
-        self.assertEqual(out.count("::error"), 13)
+        self.assertEqual(out.count("::error"), 14)
         self.assertIn("names runner label `arc-gone-matrix`", out)
         self.assertNotIn("`ubuntu-26.04`", out)
         self.assertNotIn("`macos-latest`", out)

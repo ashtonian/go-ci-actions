@@ -142,11 +142,17 @@ def flow_list(value):
 
 
 def flow_entries(value):
-    """{key: value} of a one-line flow mapping (`{group: g, labels: [a, b]}`), split at top-level commas."""
-    entries, depth, start, body = {}, 0, 0, value.strip()[1:-1]
+    """{key: value} of a one-line flow mapping (`{group: g, labels: [a, b]}`), split at the commas
+    outside brackets and quotes."""
+    entries, depth, start, quote, body = {}, 0, 0, None, value.strip()[1:-1]
     parts = []
     for i, ch in enumerate(body):
-        if ch in "[{":
+        if quote:
+            if ch == quote:
+                quote = None
+        elif ch in "\"'":
+            quote = ch
+        elif ch in "[{":
             depth += 1
         elif ch in "]}":
             depth -= 1
@@ -195,7 +201,7 @@ def node_labels(node, matrix=None):
         return [(node.line, label) for label in flow_list(node.value)]
     if node.value.startswith("{"):
         # A runner group alone (`{group: g}`) names no label to check.
-        labels = flow_entries(node.value).get("labels", "")
+        labels = unquote(flow_entries(node.value).get("labels", ""))
         if not labels:
             return []
         if labels.startswith("${{"):
