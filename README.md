@@ -443,6 +443,18 @@ changed".
   `go-owners` entry: list documentation and other files no Go code reads in
   `go-ignore`, never code inputs. Grep the tests for `ReadFile`, `Open` and
   `Glob` of relative paths before narrowing either list.
+- **Binaries.** A job that tests built binaries (a compliance suite, a soak,
+  a release snapshot) names them in `go-binaries` (`["./cmd/estavelled"]`,
+  relative to `go-directory`) instead of `go`. It runs when a file the
+  binaries' build reads changed: the GoFiles, CgoFiles, SFiles, CFiles,
+  HFiles, SysoFiles and EmbedFiles of every package in their `go list -deps`
+  closure that lives in the checkout, their modules' go.mod and go.sum, and
+  go.work. A change to a test file or testdata does not select it; its own
+  harness goes in its `paths`. Every changed file counts, `go-ignore`d ones
+  too, since a binary can embed a document. A full Go scope (a manifest, an
+  unowned file, `go list` failing) or a closure that does not load selects it.
+  Its selection is `"all"`: it checks the binaries whole. A job names `go` or
+  `go-binaries`, not both.
 - **Build configurations.** A repository that builds for several platforms or
   tag sets lists them, and the scope loads one graph per `go-builds` line and
   `go-tags` line, every pair, and unions them. `go-builds` lines are

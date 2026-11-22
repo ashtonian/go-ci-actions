@@ -8,7 +8,9 @@ inputs:
   jobs:
     description: >-
       JSON object of job ID to its inputs: an array of path globs, or
-      {"paths": [globs], "go": [package patterns]}. A "!" glob excludes: a
+      {"paths": [globs], "go": [package patterns], "go-binaries": [main
+      packages]}. go-binaries selects a job that tests built binaries only when
+      a file their build reads changed. A "!" glob excludes: a
       file selects the job when it matches a glob and no "!" glob. Go patterns
       are relative to go-directory: ./..., ./dir/..., ./dir or ".".
     required: true

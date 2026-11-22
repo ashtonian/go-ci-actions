@@ -7,7 +7,8 @@ const {input, output} = require('../lib/policy.cjs');
 const {github, workflowFile} = require('../lib/history.cjs');
 const {SHA, decideBase, describeBuild, jobSelections, lines, matcher, parseBuilds, parseConfig, parseOwners, selectJobs,
   workflowJobs} = require('../lib/scope.cjs');
-const {LIST_FIELDS, affectedPackages, byModule, importArgs, parseStream, rootDirs} = require('../lib/goaffected.cjs');
+const {CLOSURE_FIELDS, LIST_FIELDS, affectedPackages, binaryClosure, byModule, importArgs, parseStream, rootDirs} =
+  require('../lib/goaffected.cjs');
 const GIT_TIMEOUT_MS = 120000;
 const GO_TIMEOUT_MS = 600000;
 const MAX_OUTPUT = 512 * 1024 * 1024;
@@ -53,7 +54,7 @@ function go(args, cwd, env = {}) {
 }
 // The affected Go packages for the changed files outside go-ignore, or every
 // package when the change set is unknown (a full run, a shared input).
-function goScope({full, sharedFull, files, workspace: given, directory, builds, ignore, owners}) {
+function goScope({full, sharedFull, files, workspace: given, directory, builds, ignore, owners, jobs}) {
   // go list reports resolved directories.
   const workspace = fs.realpathSync(given);
   const root = path.resolve(workspace, directory);
@@ -63,15 +64,34 @@ function goScope({full, sharedFull, files, workspace: given, directory, builds, 
   const modules = parseStream(go(['list', '-m', '-json'], root));
   if (!modules.length) throw new Error('go list -m found no module in ' + directory);
   if (full || sharedFull) return {root, modules, result: {full: true, reason: full ? 'a full run' : 'a shared input changed'}};
-  const considered = files.filter(file => !ignore(file)).map(file => path.join(workspace, file));
-  if (!considered.length) return {root, modules, result: {full: false, reason: 'no Go input changed', packages: []}};
-  // One package graph per build configuration, unioned.
-  const entries = [];
-  try {
+  const listAll = (args, patterns) => {
+    const entries = [];
     for (const build of builds) {
       const tagArgs = build.tags.length ? ['-tags', build.tags.join(',')] : [];
-      entries.push(...parseStream(go(['list', '-e', '-test', '-json=' + LIST_FIELDS, ...tagArgs,
-        ...modules.map(module => module.Path + '/...')], root, build.env)));
+      entries.push(...parseStream(go(['list', '-e', ...args, ...tagArgs, ...patterns], root, build.env)));
+    }
+    return entries;
+  };
+  const changed = files.map(file => path.join(workspace, file));
+  const considered = files.filter(file => !ignore(file)).map(file => path.join(workspace, file));
+  let result = {full: false, reason: 'no Go input changed', packages: []}, binaries = {};
+  try {
+    if (considered.length) {
+      // One package graph per build configuration, unioned.
+      const entries = listAll(['-test', '-json=' + LIST_FIELDS], modules.map(module => module.Path + '/...'));
+      const ownersOf = file => owners(path.relative(workspace, file).split(path.sep).join('/'))
+        .map(dir => path.resolve(root, dir));
+      result = affectedPackages({root, modules, entries, changed: considered, exists: fs.existsSync, owners: ownersOf});
+    }
+    // A binary's closure is checked against every changed file, ignored ones
+    // too: it may embed a document.
+    if (!result.full) {
+      for (const job of jobs.filter(candidate => candidate.binaries.length)) {
+        const closure = binaryClosure(workspace, root, listAll(['-deps', '-json=' + CLOSURE_FIELDS], job.binaries));
+        const file = changed.find(candidate => closure.files.has(candidate));
+        if (file) binaries[job.id] = 'the build of ' + job.binaries.join(', ') + ' reads ' + path.relative(workspace, file);
+        else if (closure.broken) binaries[job.id] = 'the build of ' + job.binaries.join(', ') + ' does not load (' + closure.broken + ')';
+      }
     }
   } catch (error) {
     // Without the package graph the change cannot be narrowed.
@@ -79,10 +99,7 @@ function goScope({full, sharedFull, files, workspace: given, directory, builds, 
     console.log('::warning::go list could not load the packages, so every package is affected: ' + detail);
     return {root, modules, result: {full: true, reason: 'go list failed'}};
   }
-  const ownersOf = file => owners(path.relative(workspace, file).split(path.sep).join('/'))
-    .map(dir => path.resolve(root, dir));
-  return {root, modules, result: affectedPackages({root, modules, entries, changed: considered, exists: fs.existsSync,
-    owners: ownersOf})};
+  return {root, modules, result, binaries};
 }
 function summary(lines) {
   if (process.env.GITHUB_STEP_SUMMARY) fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, lines.join('\n') + '\n');
@@ -140,9 +157,9 @@ async function main() {
   let goResult = null, goPackages = {}, goArgs = '';
   if (config.jobs.some(job => job.usesGo)) {
     const scoped = goScope({full: decision.full, sharedFull, files, workspace: repo,
-      directory: input('go-directory') || '.', builds, ignore, owners});
+      directory: input('go-directory') || '.', builds, ignore, owners, jobs: config.jobs});
     const dirs = scoped.result.full ? [] : rootDirs(scoped.root, scoped.result);
-    goResult = {full: scoped.result.full, reason: scoped.result.reason, dirs,
+    goResult = {full: scoped.result.full, reason: scoped.result.reason, dirs, binaries: scoped.binaries || {},
       packages: scoped.result.full ? [] : scoped.result.packages.map((pkg, index) => ({importPath: pkg.importPath, dir: dirs[index]}))};
     goPackages = byModule(scoped.root, scoped.modules, scoped.result);
     goArgs = importArgs(scoped.modules, scoped.result).join(' ');

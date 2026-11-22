@@ -76,6 +76,10 @@ test('the configuration is validated', () => {
     '# shared\n.github/workflows/ci.yml\n\nscripts/**\n');
   assert.deepEqual(config.jobs.map(job => [job.id, job.usesGo]), [['lint', false], ['image', true], ['test', true]]);
   assert.ok(config.shared('scripts/x.sh') && !config.shared('README.md'));
+  assert.deepEqual(parseConfig('{"soak": {"paths": ["harness/**"], "go-binaries": ["./cmd/app"]}}', '').jobs[0].binaries, ['./cmd/app']);
+  for (const raw of ['{"a": {"go": ["./..."], "go-binaries": ["./cmd/app"]}}', '{"a": {"go-binaries": ["cmd/app"]}}']) {
+    assert.throws(() => parseConfig(raw, ''), Error, raw);
+  }
   for (const raw of ['', '[]', '{}', 'nope', '{"bad id": ["a"]}', '{"a": []}', '{"a": {"paths": []}}',
     '{"a": {"other": ["x"]}}', '{"a": "x"}', '{"a": ["/abs"]}', '{"a": {"go": ["cmd"]}}']) {
     assert.throws(() => parseConfig(raw, ''), Error, raw);
@@ -248,7 +252,7 @@ function repository(t, files = {'README.md': 'base\n', 'docs/guide.md': 'guide\n
   fs.mkdirSync(origin);
   git(origin, 'init', '-q');
   git(origin, 'config', 'uploadpack.allowAnySHA1InWant', 'true');
-  write(origin, {...files, '.github/workflows/ci.yml': 'on: push\njobs:\n  docs:\n  image:\n  test:\n'});
+  write(origin, {'.github/workflows/ci.yml': 'on: push\njobs:\n  docs:\n  image:\n  test:\n', ...files});
   git(origin, 'add', '.');
   git(origin, 'commit', '-q', '-m', 'base');
   const base = git(origin, 'rev-parse', 'HEAD');
@@ -440,4 +444,36 @@ test('packaged action works on a checkout in a subdirectory beside a replaced si
   assert.equal(fs.readFileSync(outputs.files, 'utf8'), 'a/a.go\n', 'paths relative to the checkout');
   await assert.rejects(runScope(t, repo, {event: 'pull_request', payload: {pull_request: {head: {sha: checkout.head}}},
     inputs: {INPUT_JOBS: jobs, INPUT_PATH: '../elsewhere'}}), /path must stay inside the workspace/);
+});
+
+test('packaged action selects a binary job only when the binary\'s build closure changed', async t => {
+  let go = true;
+  try { execFileSync('go', ['version'], {stdio: 'ignore'}); } catch { go = false; }
+  if (!go && !process.env.GITHUB_ACTIONS) return t.skip('go is not on PATH');
+  const files = {
+    'go.mod': 'module example.com/m\n\ngo 1.22\n',
+    'cmd/app/main.go': 'package main\n\nimport _ "example.com/m/pkg/foo"\n\nfunc main() {}\n',
+    'pkg/foo/foo.go': 'package foo\n',
+    'pkg/foo/foo_test.go': 'package foo\n\nimport "testing"\n\nfunc TestFoo(t *testing.T) {}\n',
+    'pkg/foo/testdata/case.txt': 'case\n',
+    'pkg/bar/bar.go': 'package bar\n',
+    'harness/run.sh': '#!/bin/sh\n',
+    '.github/workflows/ci.yml': 'on: push\njobs:\n  test:\n  compliance:\n',
+  };
+  const jobs = JSON.stringify({test: {go: ['./...']}, compliance: {paths: ['harness/**'], 'go-binaries': ['./cmd/app']}});
+  const cases = [
+    [{'pkg/foo/foo_test.go': 'package foo\n\nimport "testing"\n\nfunc TestFoo(t *testing.T) { t.Log(1) }\n'}, ['test'], 'a test file'],
+    [{'pkg/foo/testdata/case.txt': 'changed\n'}, ['test'], 'testdata'],
+    [{'pkg/bar/bar.go': 'package bar\n\nconst X = 1\n'}, ['test'], 'a package the binary does not import'],
+    [{'pkg/foo/foo.go': 'package foo\n\nconst X = 1\n'}, ['test', 'compliance'], 'a package the binary builds'],
+    [{'harness/run.sh': '#!/bin/sh\nexit 0\n'}, ['compliance'], 'its own harness'],
+  ];
+  for (const [change, expected, name] of cases) {
+    const repo = repository(t, files, change);
+    const {outputs} = await runScope(t, repo, {event: 'pull_request',
+      payload: {pull_request: {head: {sha: repo.head}, base: {sha: repo.base}, labels: []}},
+      inputs: {INPUT_JOBS: jobs, 'INPUT_GO-IGNORE': 'harness/**'}});
+    assert.deepEqual(JSON.parse(outputs.jobs), expected, name);
+    if (expected.includes('compliance')) assert.equal(JSON.parse(outputs.selections).compliance, 'all', name);
+  }
 });

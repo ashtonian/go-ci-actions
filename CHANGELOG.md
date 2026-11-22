@@ -16,6 +16,9 @@ with the tag as a comment (`@<sha> # vX.Y.Z`).
   `green_base`.
 - **scope:** a `selections` output: each selected job's affected Go packages
   as import paths, or `"all"`.
+- **scope:** per-job `go-binaries`: a job that tests built binaries runs only
+  when a file in their non-test build closure (sources, embeds, manifests)
+  changed, not for test-only changes.
 - **scope:** a `!` glob excludes in a job's `paths`, in `shared` and in
   `go-ignore` (some-with-excludes); a list of only excludes fails.
 - **scope:** `jobs-workflow` names the file defining the job IDs, for a
