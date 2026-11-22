@@ -50,13 +50,16 @@ class Fixture:
 
 
 class FakeAPI:
-    def __init__(self, runs):
+    """Pull request runs for the pull request lookup, trunk runs for the green-parent one."""
+
+    def __init__(self, runs, trunk):
         self.runs = runs
+        self.trunk = trunk
         self.calls = []
 
     def get(self, path, **query):
         self.calls.append((path, query))
-        return {"workflow_runs": self.runs}
+        return {"workflow_runs": self.runs if query.get("event") == "pull_request" else self.trunk}
 
 
 def iso(timestamp):
@@ -108,13 +111,19 @@ class AcceptanceTests(unittest.TestCase):
         run.update(fields)
         return run
 
-    def verify(self, env=None, runs=None, receipt=None):
+    def trunk_run(self, **fields):
+        run = {"id": 30, "head_sha": self.fixture.base, "head_branch": "main", "event": "push", "status": "completed",
+               "conclusion": "success", "repository": {"full_name": REPOSITORY}}
+        run.update(fields)
+        return run
+
+    def verify(self, env=None, runs=None, receipt=None, trunk=None):
         receipt = self.receipt() if receipt is None else receipt
-        api = FakeAPI([self.run_record()] if runs is None else runs)
-        result = acceptance.verify(env or self.push_env(), api=api,
-                                   receipts=lambda run, name: receipt if receipt != "missing" else None,
-                                   now=lambda: NOW)
-        return result, api
+        api = FakeAPI([self.run_record()] if runs is None else runs, [self.trunk_run()] if trunk is None else trunk)
+        self.verdict = acceptance.verify(env or self.push_env(), api=api,
+                                         receipts=lambda run, name: receipt if receipt != "missing" else None,
+                                         now=lambda: NOW)
+        return (self.verdict.reused, self.verdict.reason), api
 
     def test_receipt_records_the_pull_request_merge_tree(self):
         receipt = self.receipt()
@@ -161,8 +170,12 @@ class AcceptanceTests(unittest.TestCase):
         (reused, reason), api = self.verify()
         self.assertTrue(reused, reason)
         self.assertIn(self.fixture.tree, reason)
-        self.assertEqual(api.calls, [("actions/workflows/ci.yml/runs",
-                                      {"head_sha": self.fixture.head, "event": "pull_request", "per_page": 100})])
+        self.assertTrue(self.verdict.green_parent)
+        self.assertEqual(api.calls, [
+            ("actions/workflows/ci.yml/runs",
+             {"head_sha": self.fixture.base, "branch": "main", "status": "success", "per_page": 100}),
+            ("actions/workflows/ci.yml/runs",
+             {"head_sha": self.fixture.head, "event": "pull_request", "per_page": 100})])
 
     def test_called_workflow_names_its_own_file(self):
         with patch.dict(os.environ, {"INPUT_WORKFLOW": "ci.yml"}):
@@ -170,7 +183,7 @@ class AcceptanceTests(unittest.TestCase):
             caller = f"{REPOSITORY}/.github/workflows/release.yml@refs/heads/main"
             (reused, reason), api = self.verify(env=self.push_env(GITHUB_WORKFLOW_REF=caller), receipt=receipt)
         self.assertTrue(reused, reason)
-        self.assertEqual(api.calls[0][0], "actions/workflows/ci.yml/runs")
+        self.assertEqual({call[0] for call in api.calls}, {"actions/workflows/ci.yml/runs"})
 
     def test_anything_short_of_a_matching_receipt_runs_every_check(self):
         receipt = self.receipt()
@@ -226,6 +239,30 @@ class AcceptanceTests(unittest.TestCase):
                     self.assertRaises(ValueError):
                 self.verify()
 
+    def test_a_red_parent_never_reuses(self):
+        # Push run R1 on the parent failed a job the pull request's scope
+        # skipped; reusing the receipt would make the merge the next green base.
+        cases = {
+            "no trunk run": [],
+            "failed trunk run": [self.trunk_run(conclusion="failure")],
+            "trunk run of another commit": [self.trunk_run(head_sha="5" * 40)],
+            "pull request run": [self.trunk_run(event="pull_request")],
+            "run on another branch": [self.trunk_run(head_branch="release")],
+            "run in a fork": [self.trunk_run(repository={"full_name": "someone/repo"})],
+            "this run": [self.trunk_run(id=42)],
+        }
+        for name, trunk in cases.items():
+            with self.subTest(name):
+                (reused, reason), api = self.verify(trunk=trunk)
+                self.assertFalse(reused, reason)
+                self.assertIs(self.verdict.green_parent, False)
+                self.assertIn("has no green run of ci.yml", reason)
+                self.assertEqual(len(api.calls), 1, "no pull request lookup on a red parent")
+        for event in ("schedule", "workflow_dispatch"):
+            with self.subTest(event=event):
+                (reused, reason), _ = self.verify(trunk=[self.trunk_run(event=event)])
+                self.assertTrue(reused, reason)
+
     def test_single_parent_push_runs_every_check(self):
         receipt = self.receipt()
         git(self.repo, "commit", "-q", "--allow-empty", "-m", "direct")
@@ -239,8 +276,10 @@ class AcceptanceTests(unittest.TestCase):
             def get(self, path, **query):
                 raise OSError("connection refused")
 
-        reused, reason = acceptance.verify(self.push_env(), api=Broken(), receipts=lambda run, name: None, now=lambda: NOW)
+        reused, reason, green_parent = acceptance.verify(self.push_env(), api=Broken(), receipts=lambda run, name: None,
+                                                         now=lambda: NOW)
         self.assertFalse(reused)
+        self.assertIsNone(green_parent)
         self.assertIn("connection refused", reason)
 
     def test_receipt_archive_holds_exactly_the_receipt(self):

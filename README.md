@@ -228,8 +228,9 @@ changed".
 - **Full runs.** `workflow_dispatch`, a pull request labelled `full-label`
   (`full-ci`), `full: true`, a tag push and any other event run every job and
   every package. A `schedule` run does too, unless the newest green scheduled
-  run of the workflow on the branch was on this same commit: then the branch
-  has not moved since the last green nightly and nothing runs. So does
+  run on the branch of the workflow the schedule triggers (the caller, when
+  this is a reusable workflow) was on this same commit: then the branch has
+  not moved since the last green nightly and nothing runs. So does
   anything the scope cannot decide: no green run to compare with, a
   run-history API error, a base that cannot be fetched or diffed. Those log a
   warning and set `reason`.
@@ -326,7 +327,13 @@ jobs that check every package), `base`, `files` (a file
 listing the changed paths, one per line; empty for a full run), `reason`,
 `go-packages` (JSON object of module directory, relative to `go-directory`, to
 the package directories to check relative to the module, `"./..."` for all;
-modules with nothing affected are absent) and `go-reason`. The log lists the
+modules with nothing affected are absent), `go-args` (the affected packages'
+import paths, space-separated, or each module's `path/...` when every package
+is in scope) and `go-reason`. `go-args` runs from `go-directory` as one `go
+test` across a workspace's modules. Both forms name packages, which puts `go
+test` in package list mode: it caches test results, so with the remote cache
+an affected package whose test inputs did not change replays from cache
+rather than running (flags such as `-count=1` turn that off). The log lists the
 changed files, each job's decision and why, and the Go packages; the job
 summary repeats the decision. Invalid `jobs`, globs or patterns fail the step,
 and so does a job ID the workflow file does not define (a typo would otherwise
@@ -360,7 +367,9 @@ same workflow file over it again repeats work whose result is known.
 - **verify** runs first in the push. It outputs `reused=true` only when the
   push is the first attempt of a push to the default branch, the pushed commit
   is a merge whose first parent is the previous head (`before`), the latest
-  pull request run of the same workflow file for its second parent completed
+  commit it merges onto (its first parent) has a successful run of the same
+  workflow file on the default branch (`green_parent`), the latest pull
+  request run of that workflow for its second parent completed
   successfully within `max-age-hours` (6), that run's final attempt stored a
   receipt with the same tree, head, workflow file, variables digest, run ID
   and attempt, and every job in `required` passed in it. `required` is the
@@ -370,6 +379,14 @@ same workflow file over it again repeats work whose result is known.
   or storage error included, gives `reused=false` with the reason in
   `reason`, the log and the job summary, and every check runs. Only invalid
   inputs fail the step.
+
+The green parent closes a gap scoped runs open. A pull request's receipt
+proves only the jobs its change touched. If the push it merges onto failed a
+job the pull request skipped, reusing the receipt would turn that red trunk
+commit into the next green base and the failure would never be checked again.
+So a push onto a parent without a green run of the workflow runs its scoped
+checks, measured from the last green run. The nightly full run is the
+backstop for anything else on trunk.
 
 Tree equality covers the workflow file and everything else in the repository.
 Repository variables are compared through their digest; secrets, the runner
@@ -412,8 +429,9 @@ names its own, for example `ci.yml`), `name` (`acceptance`), `max-age-hours`
 (`6`), `token` (`github.token`, needs `actions: read` for verify) and
 `endpoint` (default `CI_ARTIFACT_ENDPOINT`). Both modes need the commit checked
 out (a shallow clone is enough), `id-token: write` for the artifact gateway
-and `CI_ARTIFACT_ENDPOINT` (a repository secret). Outputs: `reused` and
-`reason` (verify).
+and `CI_ARTIFACT_ENDPOINT` (a repository secret). Outputs (verify): `reused`,
+`reason` and `green_parent` (`true`, `false`, or empty when verify stopped
+before asking).
 
 The receipt proves only what the run's own validation proved. Possession of
 an archive is not trusted on its own: the run lookup, its conclusion and the
@@ -424,8 +442,9 @@ the push run's acceptance step: `no pull request run validated <sha>` means the
 merge was not a merge commit of a tested head, `older than the receipt
 lifetime` means the pull request sat longer than `max-age-hours`, `did not pass
 <jobs>` means the push needs jobs the pull request's scope skipped (its base
-differed from the push's), and an `acceptance evidence unavailable` reason
-names the API or gateway error.
+differed from the push's), `has no green run` means the commit the merge sits
+on failed, is still running, or never ran the workflow, and an `acceptance
+evidence unavailable` reason names the API or gateway error.
 
 ## Unchanged scheduled runs
 
@@ -441,7 +460,8 @@ another commit ends the search with `passed=false`: the jobs have something new
 to check. A run that skipped every named job is passed over. Otherwise the
 newest run that ran them decides: `passed=true` only when every matching job
 succeeded, so a failure on this commit runs them again the next time. A name
-covers the job of that name and its matrix variants, `name (variant)`. An API
+covers the job of that name, its matrix variants, `name (variant)`, and, for a
+job that calls a reusable workflow, every job it calls, `name / job`. An API
 error gives `passed=false` with a notice: missing evidence never skips work.
 After `lookback` runs that all skipped the jobs, they run again, which bounds
 how long an unchanged commit goes without them.
