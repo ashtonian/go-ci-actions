@@ -10,7 +10,7 @@ permissions:
   contents: read
   id-token: write
 env:
-  CI_ARTIFACT_ENDPOINT: ${{ vars.CI_ARTIFACT_ENDPOINT }}
+  CI_ARTIFACT_ENDPOINT: ${{ secrets.CI_ARTIFACT_ENDPOINT }}
   DOCKER_BUILD_RECORD_UPLOAD: "false"
 concurrency:
   group: docker-record-${{ github.ref }}

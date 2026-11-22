@@ -41,15 +41,16 @@ admission policy; this action does not grant approval or expand repository trust
 
 ## Interfaces
 
-Pin all actions to a reviewed full commit SHA. Configure the repository variable
-`CI_ARTIFACT_ENDPOINT`, then supply it at workflow level:
+Pin all actions to a reviewed full commit SHA. Configure the repository secret
+`CI_ARTIFACT_ENDPOINT`, then supply it at workflow level. A secret, unlike a
+variable, is masked in run logs, which a public repository publishes:
 
 ```yaml
 permissions:
   contents: read
   id-token: write
 env:
-  CI_ARTIFACT_ENDPOINT: ${{ vars.CI_ARTIFACT_ENDPOINT }}
+  CI_ARTIFACT_ENDPOINT: ${{ secrets.CI_ARTIFACT_ENDPOINT }}
 # In producer steps:
 # - uses: ashtonian/go-ci-actions/upload-artifact@<reviewed-commit>
 #   with:

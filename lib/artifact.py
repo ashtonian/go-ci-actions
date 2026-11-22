@@ -371,7 +371,7 @@ def setup():
     endpoint = input_value("endpoint") or os.environ.get("CI_ARTIFACT_ENDPOINT", "")
     bucket = input_value("bucket", "ci-artifacts")
     if not endpoint:
-        raise ValueError("set the CI_ARTIFACT_ENDPOINT repository variable or runner environment")
+        raise ValueError("set the CI_ARTIFACT_ENDPOINT repository secret or runner environment")
     for key, value in (("CI_ARTIFACT_ENDPOINT", endpoint), ("CI_ARTIFACT_BUCKET", bucket), ("CI_ARTIFACT_TOOL", str(Path(__file__).resolve()))):
         if "\n" in value or "\r" in value:
             raise ValueError("artifact configuration contains a newline")

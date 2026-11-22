@@ -13,7 +13,7 @@ concurrency:
   group: artifacts-${{ github.ref }}
   cancel-in-progress: true
 env:
-  CI_ARTIFACT_ENDPOINT: ${{ vars.CI_ARTIFACT_ENDPOINT }}
+  CI_ARTIFACT_ENDPOINT: ${{ secrets.CI_ARTIFACT_ENDPOINT }}
 jobs:
   upload:
     if: github.actor_id == '4212452' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
