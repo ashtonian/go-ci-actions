@@ -46,6 +46,9 @@ outputs:
   green_base:
     description: "verify: true when base has a green run of the workflow on the default branch, false when not (no reuse), empty without base or when verify stopped before asking."
     value: ${{ steps.acceptance.outputs.green_base }}
+  green_parent:
+    description: "Deprecated: the same value as green_base, kept for one minor release so v1.8.0 and v1.9.0 consumers can bump without edits; removed in v1.11.0."
+    value: ${{ steps.acceptance.outputs.green_base }}
 runs:
   using: composite
   steps:
