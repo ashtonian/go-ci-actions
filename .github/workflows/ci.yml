@@ -32,6 +32,8 @@ jobs:
         with:
           node-version: "24"
       - run: npm test
+      - name: Acceptance receipt contracts
+        run: python3 -m unittest discover -s test -p acceptance_test.py
       - uses: ./
         with:
           go-version-file: fixtures/go.work

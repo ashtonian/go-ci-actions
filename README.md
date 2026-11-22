@@ -208,6 +208,92 @@ selection from there. Use it once per job. A Dockerfile that cross-compiles in
 `$BUILDPLATFORM` stages should keep a single amd64 builder, because on this
 builder its compile stage would run on the arm64 node.
 
+## Push acceptance
+
+`ashtonian/go-ci-actions/acceptance@FULL_COMMIT_SHA` lets the push that merges
+a pull request skip the checks the pull request already passed on the same
+tree. A pull request run tests GitHub's merge commit of the head into the base;
+when the merge button then pushes a merge commit with that tree, running the
+same workflow file over it again repeats work whose result is known.
+
+- **record** runs in the pull request, in a job that needs every validation
+  job. It refuses unless the event is a pull request from this repository, the
+  checkout is that pull request's merge commit (second parent the head), and
+  every job in `results` succeeded. It stores a receipt, `acceptance.json`, as
+  the run's `acceptance` artifact in SeaweedFS (seven-day retention): the
+  repository, workflow file, run ID and attempt, the merge commit's SHA,
+  parents and tree, a SHA-256 of the repository variables, and the job names.
+- **verify** runs first in the push. It outputs `reused=true` only when the
+  push is the first attempt of a push to the default branch, the pushed commit
+  is a merge whose first parent is the previous head (`before`), the latest
+  pull request run of the same workflow file for its second parent completed
+  successfully within `max-age-hours` (6), and that run's final attempt stored
+  a receipt with the same tree, head, workflow file, variables digest, run ID
+  and attempt. Anything else, an API or storage error included, gives
+  `reused=false` with the reason in `reason`, the log and the job summary, and
+  every check runs; verify itself never fails the job.
+
+Tree equality covers the workflow file and everything else in the repository.
+Repository variables are compared through their digest; secrets, the runner
+image and time-dependent inputs (a vulnerability database, a `1.27.x` toolchain
+resolving to a newer patch) are not, which is what the age limit bounds. A
+squash or rebase merge, a direct push, a push of several commits and an
+explicit rerun all execute every check.
+
+```yaml
+env:
+  CI_ARTIFACT_ENDPOINT: ${{ secrets.CI_ARTIFACT_ENDPOINT }}
+jobs:
+  acceptance:
+    if: github.event_name == 'push'
+    runs-on: <runner>
+    permissions: {contents: read, actions: read, id-token: write}
+    outputs:
+      reused: ${{ steps.verify.outputs.reused }}
+    steps:
+      - uses: actions/checkout@<sha>
+        with: {persist-credentials: false}
+      - id: verify
+        uses: ashtonian/go-ci-actions/acceptance@FULL_COMMIT_SHA
+        with: {mode: verify, variables: "${{ toJSON(vars) }}"}
+  test:
+    needs: acceptance
+    # !cancelled() lets the job run when acceptance is skipped (pull requests).
+    if: ${{ !cancelled() && needs.acceptance.outputs.reused != 'true' }}
+    ...
+  accepted:
+    needs: [test, lint]
+    # Without a status function this runs only when every need succeeded.
+    if: github.event_name == 'pull_request'
+    runs-on: <runner>
+    permissions: {contents: read, id-token: write}
+    steps:
+      - uses: actions/checkout@<sha>
+        with: {persist-credentials: false}
+      - uses: ashtonian/go-ci-actions/acceptance@FULL_COMMIT_SHA
+        with: {mode: record, results: "${{ toJSON(needs) }}", variables: "${{ toJSON(vars) }}"}
+```
+
+Inputs: `mode` (`record` or `verify`, required), `results` (record:
+`toJSON(needs)`), `variables` (`toJSON(vars)`, default `{}`; pass the same in
+both modes), `workflow` (the workflow file holding the receipts, default the
+running workflow; a workflow called with `workflow_call` sees its caller's
+file, so it names its own, for example `ci.yml`), `name` (`acceptance`),
+`max-age-hours` (`6`), `token` (`github.token`, needs `actions: read` for
+verify) and `endpoint` (default `CI_ARTIFACT_ENDPOINT`). Both modes need the
+commit checked out (a shallow clone is enough) and `id-token: write` for the
+artifact gateway. Outputs: `reused` and `reason` (verify).
+
+The receipt proves only what the run's own validation proved. Possession of
+an archive is not trusted on its own: the run lookup, its conclusion and the
+gateway's per-run write scope are what make it evidence. Lookups share a
+100-second deadline, with 10-second API timeouts, a 4 MiB API document limit
+and a 128 KiB receipt limit. When reuse unexpectedly stops, read `reason` in
+the push run's acceptance job: `no pull request run validated <sha>` means the
+merge was not a merge commit of a tested head, `older than the receipt
+lifetime` means the pull request sat longer than `max-age-hours`, and an
+`acceptance evidence unavailable` reason names the API or gateway error.
+
 ## Ownership and validation
 
 This repository owns toolchain/cache policy. Consumers own build/test commands.
@@ -228,7 +314,11 @@ directory, and the disabled contract that off mode has no key. Policy tests
 cover reruns, invalid inputs, safe pruning, long-running jobs, backend
 selection, manifest scoping and patterns, skipping the digest and the post-step
 walk when nothing is archived, and the npm registry cache's selection,
-precedence and health paths. No npm dependencies.
+precedence and health paths. No npm dependencies. `test/acceptance_test.py`
+(`python3 -m unittest discover -s test -p acceptance_test.py`) checks that a
+receipt is recorded only for a passing same-repository pull request merge
+commit and that verify reuses validation only for a matching receipt, against
+a real Git merge fixture; the smoke job runs it.
 
 Release signed commits with immutable version tags. Upgrade consumers through
 reviewed SHA changes and roll back to the previous SHA. Measure cold, warm,

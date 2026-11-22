@@ -341,6 +341,15 @@ def extract(archive, destination):
                     shutil.copyfileobj(src, dst, 1024 * 1024)
 
 
+def fetch(store, item, archive, max_bytes=MAX_EXTRACTED):
+    """Download one listed artifact's ZIP and verify it against its manifest."""
+    if item["size"] > max_bytes:
+        raise ValueError("artifact exceeds download byte limit")
+    store.request("GET", item["key"], target=archive, max_bytes=max_bytes)
+    if archive.stat().st_size != item["size"] or sha256(archive) != item["sha256"]:
+        raise ValueError("artifact archive failed size/SHA-256 verification")
+
+
 def download(store, destination, name="", pattern="", run_id=None, attempt=None, merge=False, archive_only=False, max_bytes=MAX_EXTRACTED):
     if not 0 < max_bytes <= MAX_EXTRACTED:
         raise ValueError("download byte limit must be positive and at most 50 GiB")
@@ -351,13 +360,9 @@ def download(store, destination, name="", pattern="", run_id=None, attempt=None,
     if archive_only and len(matches) != 1:
         raise ValueError("archive download requires exactly one named artifact")
     for item in matches:
-        if item["size"] > max_bytes:
-            raise ValueError("artifact exceeds download byte limit")
         with tempfile.TemporaryDirectory(prefix="ci-artifact-") as directory:
             archive = Path(directory) / "artifact.zip"
-            store.request("GET", item["key"], target=archive, max_bytes=max_bytes)
-            if archive.stat().st_size != item["size"] or sha256(archive) != item["sha256"]:
-                raise ValueError("artifact archive failed size/SHA-256 verification")
+            fetch(store, item, archive, max_bytes)
             if archive_only:
                 shutil.copyfile(archive, destination)
             else:

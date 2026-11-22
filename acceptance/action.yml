@@ -1,0 +1,51 @@
+name: acceptance
+description: >-
+  Record a pull request's passing validation as a receipt for its merge commit's
+  tree, and let the push that merges the same tree skip the checks that passed.
+inputs:
+  mode:
+    description: "record, in a pull request job that needs every validation job; verify, first in a push."
+    required: true
+  results:
+    description: "record: the needs context of the validation jobs, toJSON(needs). Every job must have succeeded."
+    default: ""
+  variables:
+    description: "toJSON(vars). A receipt recorded under other repository variables is not reused."
+    default: "{}"
+  workflow:
+    description: "Workflow file whose pull request runs hold the receipts. Empty is the running workflow; a called workflow names its own file."
+    default: ""
+  name:
+    description: "Receipt artifact name."
+    default: acceptance
+  max-age-hours:
+    description: "verify: a pull request run older than this is not reused."
+    default: "6"
+  token:
+    description: "verify: token that can read Actions runs."
+    default: ${{ github.token }}
+  endpoint:
+    description: "SeaweedFS artifact origin; defaults to CI_ARTIFACT_ENDPOINT."
+    default: ""
+outputs:
+  reused:
+    description: "verify: true when a matching pull request receipt covers this push; false otherwise."
+    value: ${{ steps.acceptance.outputs.reused }}
+  reason:
+    description: "verify: why the validation was or was not reused."
+    value: ${{ steps.acceptance.outputs.reason }}
+runs:
+  using: composite
+  steps:
+    - id: acceptance
+      shell: bash
+      env:
+        INPUT_MODE: ${{ inputs.mode }}
+        INPUT_RESULTS: ${{ inputs.results }}
+        INPUT_VARIABLES: ${{ inputs.variables }}
+        INPUT_WORKFLOW: ${{ inputs.workflow }}
+        INPUT_NAME: ${{ inputs.name }}
+        INPUT_MAX_AGE_HOURS: ${{ inputs.max-age-hours }}
+        INPUT_ENDPOINT: ${{ inputs.endpoint }}
+        GITHUB_TOKEN: ${{ inputs.token }}
+      run: python3 "$GITHUB_ACTION_PATH/../lib/acceptance.py"
