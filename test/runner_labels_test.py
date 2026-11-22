@@ -36,6 +36,14 @@ jobs:
     runs-on:
       group: arc
       labels: arc-gone-group
+  flowmap:
+    runs-on: {group: arc, labels: [arc-live, arc-gone-flowmap]}
+  groupmap:
+    runs-on: {group: arc}
+  flowscalar:
+    runs-on: {labels: arc-gone-flowscalar, group: "a, b"}
+  paren:
+    runs-on: ${{ (vars.LARGE && 'arc-gone-paren') || 'arc-live' }}
   fallback:
     runs-on: ${{ vars.RUNNER || 'arc-gone-fallback' }}
   chosen:
@@ -72,6 +80,8 @@ class Answer(http.server.BaseHTTPRequestHandler):
         Answer.seen.append(self.path)
         data = json.dumps(self.body).encode()
         self.send_response(self.status)
+        if 300 <= self.status < 400:
+            self.send_header("Location", "/elsewhere")
         self.send_header("Content-Length", str(len(data)))
         self.end_headers()
         self.wfile.write(data)
@@ -106,8 +116,10 @@ class LabelTests(Workflows):
         gone = {label for label in found if label.startswith("arc-gone")}
         self.assertEqual(gone, {"arc-gone-default", "arc-gone-flow", "arc-gone-block", "arc-gone-group",
                                 "arc-gone-fallback", "arc-gone-choice", "arc-gone-matrix", "arc-gone-include",
-                                "arc-gone-json", "arc-gone-call"})
+                                "arc-gone-json", "arc-gone-call", "arc-gone-flowmap", "arc-gone-flowscalar",
+                                "arc-gone-paren"})
         self.assertNotIn("push", found, "a comparison operand is no label")
+        self.assertFalse(any(label.startswith(("{", "group")) for label in found), "a flow mapping is no label")
         self.assertNotIn("arc-not-a-runner", found, "only runner inputs name runners")
         self.assertIn("macos-latest", found)
 
@@ -116,7 +128,7 @@ class LabelTests(Workflows):
         file.write_text(json.dumps({"labels": ["arc-live"]}))
         code, out = self.run_main(labels_file=str(file))
         self.assertEqual(code, 1)
-        self.assertEqual(out.count("::error"), 10)
+        self.assertEqual(out.count("::error"), 13)
         self.assertIn("names runner label `arc-gone-matrix`", out)
         self.assertNotIn("`ubuntu-26.04`", out)
         self.assertNotIn("`macos-latest`", out)
@@ -159,6 +171,13 @@ class ServiceTests(Workflows):
                 self.assertEqual(code, 0)
                 self.assertIn("::warning::", out)
                 self.assertNotIn("::error", out)
+
+    def test_follows_no_redirect(self):
+        Answer.status = 302
+        code, out = self.run_main(endpoint=self.endpoint)
+        self.assertEqual(code, 0)
+        self.assertIn("HTTP 302", out)
+        self.assertEqual(len(Answer.seen), 1, "the redirect target is never requested")
 
     def test_passes_with_a_warning_when_unreachable_or_unconfigured(self):
         self.server.shutdown()

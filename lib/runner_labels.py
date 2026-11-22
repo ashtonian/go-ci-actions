@@ -39,8 +39,8 @@ KEY = re.compile(r"""^(?P<key>"[^"]*"|'[^']*'|[^\s#"'][^:#]*?)\s*:(?:\s+(?P<rest
 BLOCK_SCALAR = re.compile(r"^[|>][-+0-9]*$")
 QUOTED = re.compile(r"'((?:[^']|'')*)'")
 MATRIX = re.compile(r"\bmatrix\.([A-Za-z_][A-Za-z0-9_-]*)")
-RESULT_BEFORE = ("${{", "||", "&&")
-RESULT_AFTER = ("}}", "||", "&&")
+RESULT_BEFORE = ("${{", "||", "&&", "(")
+RESULT_AFTER = ("}}", "||", "&&", ")")
 
 
 class Unavailable(Exception):
@@ -141,6 +141,26 @@ def flow_list(value):
     return [unquote(part.strip()) for part in value.strip("[]").split(",") if part.strip()]
 
 
+def flow_entries(value):
+    """{key: value} of a one-line flow mapping (`{group: g, labels: [a, b]}`), split at top-level commas."""
+    entries, depth, start, body = {}, 0, 0, value.strip()[1:-1]
+    parts = []
+    for i, ch in enumerate(body):
+        if ch in "[{":
+            depth += 1
+        elif ch in "]}":
+            depth -= 1
+        elif ch == "," and depth == 0:
+            parts.append(body[start:i])
+            start = i + 1
+    parts.append(body[start:])
+    for part in parts:
+        key, _, item = part.partition(":")
+        if key.strip():
+            entries[unquote(key.strip())] = item.strip()
+    return entries
+
+
 def expression_labels(expression):
     """The labels an expression can evaluate to, as far as its text says.
 
@@ -173,6 +193,14 @@ def node_labels(node, matrix=None):
         return found
     if node.value.startswith("["):
         return [(node.line, label) for label in flow_list(node.value)]
+    if node.value.startswith("{"):
+        # A runner group alone (`{group: g}`) names no label to check.
+        labels = flow_entries(node.value).get("labels", "")
+        if not labels:
+            return []
+        if labels.startswith("${{"):
+            return [(node.line, label) for label in expression_labels(labels)]
+        return [(node.line, label) for label in (flow_list(labels) if labels.startswith("[") else [unquote(labels)])]
     if node.value:
         return [(node.line, node.value)]
     labels = node.get("labels")
@@ -268,6 +296,7 @@ def bundle_url(env):
 
 
 def fetch(endpoint, repository):
+    # http.client follows no redirect: a 3xx is an answer other than 200.
     url = urllib.parse.urlsplit(endpoint.rstrip("/"))
     target = url.path + "/v1/labels?" + urllib.parse.urlencode({"repository": repository})
     connection_type = http.client.HTTPSConnection if url.scheme == "https" else http.client.HTTPConnection

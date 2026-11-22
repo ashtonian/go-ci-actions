@@ -801,6 +801,10 @@ It reads every workflow in `workflows` (`.github/workflows`):
 - the inputs named `runner` or `*-runner` of a reusable workflow call, and the
   defaults of such inputs in `workflow_call`.
 
+A `runs-on` mapping, block or flow (`{group: g, labels: [a]}`), contributes
+its `labels`; a runner group alone names no label to check. Result literals
+count inside parentheses too (`(c && 'arc-a') || 'arc-b'`).
+
 A label passes when the list holds it, when it is a GitHub-hosted image
 (`ubuntu-*`, `windows-*`, `macos-*`), or when it matches an `allow` pattern.
 Anything else is an error annotated at its line. An expression with no
@@ -812,15 +816,15 @@ service: `endpoint`, else the runner's `CI_RUNNER_LABELS_URL`, else
 which a job container sees as well). It sends
 `GET <endpoint>/v1/labels?repository=<owner>/<name>` and expects `200` with
 `{"labels": [...]}`, with a 3-second connect and a 10-second read timeout and
-a 1 MiB answer limit. Each URL must be HTTP(S) without credentials or a
-fragment, as for the other runner services.
+a 1 MiB answer limit, and follows no redirect. Each URL must be HTTP(S)
+without credentials or a fragment, as for the other runner services.
 
 Failure modes, and what each does:
 
 | Case | Result |
 |---|---|
 | A workflow names a label the list lacks | an error annotation at its line; the step fails |
-| The service refuses, times out, answers non-`200`, oversized or malformed | `::warning::runner label check skipped: <why>`, `checked=false`, the step passes |
+| The service refuses, times out, redirects, answers non-`200`, oversized or malformed | `::warning::runner label check skipped: <why>`, `checked=false`, the step passes |
 | No source: no input, variable or bundle entry (a GitHub-hosted runner, a host outside the cluster) | the same warning, naming what is missing |
 | The runner's own URL is malformed | the same warning: it is the runner's to fix, not the change's |
 | The `endpoint` input is malformed | the step fails |

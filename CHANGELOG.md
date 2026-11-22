@@ -11,9 +11,10 @@ with the tag as a comment (`@<sha> # vX.Y.Z`).
   `runner`/`*-runner` inputs of reusable workflow calls, and checks them
   against the labels the site's runner label service serves for the
   repository (`endpoint`, else `CI_RUNNER_LABELS_URL`, else `runnerLabelsURL`
-  in the runner bundle) or against `labels-file`. Only a definitive list fails
-  it; an unreachable, failing or unconfigured service skips the check with a
-  warning.
+  in the runner bundle, each HTTP(S) without credentials or a fragment, with
+  no redirect followed) or against `labels-file`. Only a definitive list
+  fails it, and a malformed `endpoint` input; an unreachable, failing or
+  unconfigured service skips the check with a warning.
 
 ## v1.11.1
 
