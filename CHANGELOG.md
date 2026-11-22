@@ -3,6 +3,15 @@
 Releases are signed tags on merge commits of `main`. Pin the full commit SHA
 with the tag as a comment (`@<sha> # vX.Y.Z`).
 
+## v1.11.1
+
+- **acceptance:** a `workflow_dispatch` run on a branch records a receipt for
+  the branch head, and a push reuses it when the merge has the head's tree,
+  under the same selection and green-base rules. A bot's pull request, whose
+  own run cannot start under an owner-only actor policy, is validated that
+  way. verify considers the latest pull_request or workflow_dispatch run for
+  the merge's second parent; a pull request receipt must still be the merge.
+
 ## v1.11.0
 
 - **acceptance:** a push reuses a job only when the pull request checked at

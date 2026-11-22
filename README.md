@@ -589,12 +589,17 @@ when the merge button then pushes a merge commit with that tree, running the
 same workflow file over it again repeats work whose result is known.
 
 - **record** runs in the pull request, in a job that needs every validation
-  job. It refuses unless the event is a pull request from this repository, the
-  checkout is that pull request's merge commit (second parent the head), and
-  no job in `results` failed or was cancelled. It stores a receipt,
+  job. It refuses unless the event is a pull request from this repository and
+  the checkout is that pull request's merge commit (second parent the head),
+  or the event is a `workflow_dispatch` on a branch and the checkout is that
+  branch's head, and no job in `results` failed or was cancelled. A dispatched
+  run is how a pull request whose own run cannot start (a bot's, under an
+  owner-only actor policy) gets validated; its receipt serves the merge when
+  the merge has the head's tree, as it does when the branch contains the
+  default branch. It stores a receipt,
   `acceptance.json`, as the run's `acceptance` artifact in SeaweedFS
   (seven-day retention): the repository, workflow file, run ID and attempt,
-  the merge commit's SHA, parents and tree, a SHA-256 of the repository
+  the event, the validated commit's SHA, parents and tree, a SHA-256 of the repository
   variables, the jobs that passed and the jobs that were skipped (by the
   run's scope or any other condition) as separate lists, and `selections`,
   what each job checked (the scope's output).
@@ -602,8 +607,9 @@ same workflow file over it again repeats work whose result is known.
   push is the first attempt of a push to the default branch, the pushed commit
   is a merge whose first parent is the previous head (`before`), `base` (the
   scope's base) has a successful run of the same workflow file on the
-  default branch (`green_base`), the latest pull request run of that workflow
-  for the merge's second parent completed successfully within
+  default branch (`green_base`), the latest validation run (pull_request or
+  workflow_dispatch) of that workflow for the merge's second parent completed
+  successfully within
   `max-age-hours` (6), that run's final attempt stored a
   receipt with the same tree, head, workflow file, variables digest, run ID
   and attempt, and every job in `required` passed in it having checked at
@@ -710,8 +716,10 @@ an archive is not trusted on its own: the run lookup, its conclusion and the
 gateway's per-run write scope are what make it evidence. Lookups share a
 100-second deadline, with 10-second API timeouts, a 4 MiB API document limit
 and a 128 KiB receipt limit. When reuse unexpectedly stops, read `reason` in
-the push run's acceptance step: `no pull request run validated <sha>` means the
-merge was not a merge commit of a tested head, `older than the receipt
+the push run's acceptance step: `no pull request or dispatched run validated
+<sha>` means the merge was not a merge commit of a tested head, a `head`
+mismatch on a dispatched receipt means the branch was behind the default
+branch (so the merge's tree differs), `older than the receipt
 lifetime` means the pull request sat longer than `max-age-hours`, `did not pass
 <jobs>` means the push needs jobs the pull request's scope skipped (its base
 differed from the push's), `has no green run` means the scope's base did not pass
