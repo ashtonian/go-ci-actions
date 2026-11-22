@@ -232,7 +232,9 @@ changed".
   fetched or diffed. Those log a warning and set `reason`.
 - **Jobs.** `jobs` maps each job ID to its inputs: path globs, Go package
   patterns, or both. A job runs when one of its paths changed or one of its Go
-  packages is affected. A change to any `shared` path (workflow files, CI
+  packages is affected. A Go job's paths are its own configuration and
+  scripts (a linter config, a test script), so when one of them selects it
+  the job checks every package; `wide-jobs` lists those jobs. A change to any `shared` path (workflow files, CI
   scripts, the files that pin the toolchain) runs every job. Globs are
   repository-relative: `**` as a whole segment spans directories, `*` and `?`
   stay within a segment, dot files match, everything else is literal.
@@ -266,6 +268,7 @@ jobs:
       CI_ARTIFACT_ENDPOINT: ${{ secrets.CI_ARTIFACT_ENDPOINT }}
     outputs:
       jobs: ${{ steps.accepted.outputs.reused == 'true' && '[]' || steps.scope.outputs.jobs }}
+      wide-jobs: ${{ steps.scope.outputs.wide-jobs }}
       go-packages: ${{ steps.scope.outputs.go-packages }}
     steps:
       - uses: actions/checkout@<sha>
@@ -298,8 +301,9 @@ jobs:
     if: contains(needs.scope.outputs.jobs, '"test"')
     steps:
       - env:
-          PACKAGES: ${{ needs.scope.outputs.go-packages }}
-        # {"<module dir>": ["./pkg", "."]}: run go test on each module's list.
+          # {"<module dir>": ["./pkg", "."]}: go test each module's list, or
+          # every package when the job is in wide-jobs.
+          PACKAGES: ${{ contains(needs.scope.outputs.wide-jobs, '"test"') && 'all' || needs.scope.outputs.go-packages }}
         run: ...
 ```
 
@@ -309,7 +313,8 @@ default the running workflow, and a called workflow names its own file),
 `lookback` (20, 1-100), `go-directory` (`.`), `go-tags`, `go-ignore` and `token`
 (`github.token`; needs `actions: read` for a push and `contents: read`).
 Outputs: `full` (`true` when every job and package is in scope), `jobs` (JSON
-array of the selected job IDs, in `jobs` order), `base`, `files` (a file
+array of the selected job IDs, in `jobs` order), `wide-jobs` (the selected
+jobs that check every package), `base`, `files` (a file
 listing the changed paths, one per line; empty for a full run), `reason`,
 `go-packages` (JSON object of module directory, relative to `go-directory`, to
 the package directories to check relative to the module, `"./..."` for all;

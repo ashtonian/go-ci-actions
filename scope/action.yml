@@ -43,6 +43,8 @@ outputs:
     description: "true when every job and every Go package is in scope."
   jobs:
     description: "JSON array of the job IDs that run, in jobs order."
+  wide-jobs:
+    description: "JSON array of the selected jobs that check every package, not only the affected ones: a full run, a shared change, or one of the job's own paths changed."
   base:
     description: "The commit the change is measured from; empty for a full run."
   files:

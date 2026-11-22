@@ -109,7 +109,12 @@ test('jobs run when their paths change or their Go packages are affected', () =>
   assert.deepEqual(pick([], go([])), []);
   const shared = selectJobs(config, {full: false, files: ['.github/workflows/ci.yml'], go: go([])});
   assert.deepEqual([shared.jobs, shared.shared], [['docs', 'lint', 'image', 'conformance'], '.github/workflows/ci.yml']);
-  assert.deepEqual(selectJobs(config, {full: true, files: [], go: null}).jobs, ['docs', 'lint', 'image', 'conformance']);
+  assert.deepEqual(shared.wide, shared.jobs);
+  const full = selectJobs(config, {full: true, files: [], go: null});
+  assert.deepEqual([full.jobs, full.wide], [['docs', 'lint', 'image', 'conformance'], ['docs', 'lint', 'image', 'conformance']]);
+  // A job's own paths are its configuration: they widen it to every package.
+  const own = selectJobs(config, {full: false, files: ['Dockerfile', 'internal/x.go'], go: go(['./internal'])});
+  assert.deepEqual([own.jobs, own.wide], [['lint', 'image'], ['image']]);
 });
 
 // The packaged action over a real repository, with a stub GitHub API serving
@@ -249,6 +254,7 @@ test('packaged action narrows Go jobs to the affected packages', async t => {
     payload: {pull_request: {head: {sha: repo.head}, base: {sha: repo.base}, labels: []}},
     inputs: {INPUT_JOBS: JSON.stringify(jobs), 'INPUT_GO-IGNORE': 'docs/**\n'}});
   assert.deepEqual(JSON.parse(outputs.jobs), ['test', 'docs']);
+  assert.deepEqual(JSON.parse(outputs['wide-jobs']), ['docs']);
   assert.deepEqual(JSON.parse(outputs['go-packages']), {'.': ['./a', './b']});
   const unignored = await runScope(t, repo, {event: 'pull_request',
     payload: {pull_request: {head: {sha: repo.head}, base: {sha: repo.base}, labels: []}},

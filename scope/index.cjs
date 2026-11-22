@@ -124,6 +124,7 @@ async function main() {
   const reason = decision.reason + (selection.shared ? '; the shared input ' + selection.shared + ' changed' : '');
   output('full', String(decision.full || Boolean(selection.shared)));
   output('jobs', JSON.stringify(selection.jobs));
+  output('wide-jobs', JSON.stringify(selection.wide));
   output('base', decision.full ? '' : decision.base);
   output('files', filesPath);
   output('reason', reason);
@@ -133,7 +134,9 @@ async function main() {
   if (!decision.full) console.log(files.length + ' changed file(s)' + (files.length ? ':\n  ' + files.slice(0, 200).join('\n  ') : ''));
   for (const job of config.jobs) {
     const why = selection.why[job.id];
-    console.log('  ' + job.id + ': ' + (selection.jobs.includes(job.id) ? 'runs' + (why ? ' (' + why + ')' : '') : 'skipped'));
+    const runs = selection.jobs.includes(job.id);
+    const scope = runs && job.usesGo ? (selection.wide.includes(job.id) ? ', every package' : ', affected packages') : '';
+    console.log('  ' + job.id + ': ' + (runs ? 'runs' + (why ? ' (' + why + scope + ')' : scope ? ' (' + scope.slice(2) + ')' : '') : 'skipped'));
   }
   if (goResult) console.log('Go packages (' + goResult.reason + '): ' + JSON.stringify(goPackages));
   summary(['### Scope', '', reason + '.', '', 'Jobs: ' + (selection.jobs.join(', ') || 'none') + '.',
