@@ -15,19 +15,22 @@ Optional inputs: go-version (empty), go-version-file (go.mod), check-latest
 (false), workload (empty), cache-dependency-path (empty: the manifests under
 go-version-file's directory, see Policy), cache-mode (read-write),
 cache-key-prefix (go-v1), seed-from-other-workloads (true),
-max-staleness-hours (2), build-cache-backend (auto) and module-proxy (auto).
+max-staleness-hours (2), build-cache-backend (auto), module-proxy (auto) and
+test-input-mtimes (content, see Test results across checkouts).
 
 Set cache-mode to read-only to restore without pruning or saving; off installs
-Go without restoring or saving caches. Include matrix variants, build flags and
-external C library versions in workload. Go does not detect changes to cgo system
-libraries. Keep forced execution for integration, benchmark and other
+Go without restoring or saving caches, and leaves the checkout's file times
+alone. Include matrix variants, build flags and external C library versions in
+workload. Go does not detect changes to cgo system libraries. Keep forced
+execution (`-count=1`) for integration, benchmark and other
 environment-dependent checks in caller workflows.
 
 Outputs: go-version, actual-toolchain, build-cache-backend (github, remote or
 off), module-proxy (the runner proxy in use, or empty), cache-primary-key
 (empty when nothing is archived, which includes cache-mode off),
-cache-matched-key, cache-hit. A prefix restore provides reuse even when
-cache-hit is false.
+cache-matched-key, cache-hit, test-input-mtimes (content when the checkout's
+tracked files carry content-derived times, off otherwise). A prefix restore
+provides reuse even when cache-hit is false.
 
 ## Policy
 
@@ -104,6 +107,91 @@ fall back to the same workload's older manifests, then (with
 seed-from-other-workloads) to any workload's archive. The local plugin
 directory is per job and is not trimmed, measured or archived;
 max-staleness-hours applies to the GitHub backend only.
+
+## Test results across checkouts
+
+`go test` replays a passing package's result from the build cache when nothing
+it depends on changed. The key covers the test binary (the package, every
+dependency, build flags, toolchain), the cacheable test flags, the environment
+variables the test read, and every file inside the module it opened or
+stat'ed, recorded by absolute path, size, mode and modification time, not by
+content (`cmd/go/internal/test`, `hashOpen`). A file modified less than two
+seconds before the run disables caching for that package. `actions/checkout`
+writes every file at checkout time, so with checkout times no package whose
+tests read `testdata` ever matches a result recorded in another job, even
+though its compiled objects hit the shared cache.
+
+With test-input-mtimes `content` (the default), setup gives every tracked file
+and symbolic link in the Git work tree holding go-version-file a modification
+time derived from its bytes, after checkout and before any test runs:
+
+- **Derivation.** SHA-256 over a versioned prefix and the file's bytes (a
+  link's target path for a symbolic link); the first 48 bits become
+  2000-01-01T00:00:00Z plus 29 bits of seconds and 19 bits of binary fraction.
+  Every time falls between 2000 and 2017: years older than the two-second
+  cutoff, and inside 32-bit seconds. The fraction is exact as a double and
+  survives Node's microsecond timestamps, so identical bytes give an identical
+  time in every checkout on every runner, and adjacent fractions stay
+  distinct. Go also keys on size, so a false match needs two different
+  contents of the same size at the same path whose 48 bits collide:
+  probability 2^-48 per pair (2^-29 on a filesystem that stores whole
+  seconds). The runners' ext4/XFS and APFS store nanoseconds.
+- **Directories.** Every directory holding a stamped path (and the work tree
+  root) gets 2000-01-01T00:00:00Z exactly. Go hashes a directory it reads by
+  its own stat plus every entry's name and stat, so a constant directory time
+  still sees an entry added, removed or changed.
+- **What is on disk now.** The time comes from the file's current bytes, not
+  from the index, so a file a step changed before setup gets its new content's
+  time. A file written after setup gets the time of that write, which misses
+  (and inside two seconds is not cached at all): conservative. Copies that
+  preserve times (`cp -p`, `tar`) keep a content-derived time with its
+  content. Nothing may write tracked files while setup runs.
+- **Left alone.** Untracked and ignored files (generated during the job, so
+  tests reading them re-execute), submodule contents (another repository's
+  index), index entries absent from disk (sparse checkouts), sibling
+  checkouts in the workspace other than go-version-file's, and files this user
+  may not re-time. A workspace without Git, or a work tree outside the
+  workspace, is logged as a notice and left unchanged.
+- **Git's index.** The index caches each file's stat, so setup refreshes it
+  (`git update-index -q --refresh`) after stamping; without that, plumbing
+  such as `git diff-index --quiet HEAD` would report every file as changed. A
+  file that differs from the index still shows as modified.
+
+The log line reports the files, links and directories stamped and the time
+taken. The cost is one read of the tracked bytes by setup plus one by Git's
+refresh, which rehashes every re-timed file: in a Linux container on 4 CPUs,
+a 62,950-file, 952 MB checkout (gox, 921 MB of it `bench-results/`) took
+3.0 s, 2.0 s of it the refresh; this repository's checkout takes tens of
+milliseconds. A job that runs no `go test` can set test-input-mtimes `off`.
+
+**What callers keep forced.** Content-derived times make a cached result as
+trustworthy as the files Go can see. A test whose outcome depends on anything
+else must keep `-count=1`: databases, containers, network services, processes
+it starts, the installed `git` or other tools, the wall clock, kernel features
+(io_uring availability, cgroups), hardware, randomness it does not seed, and
+files outside the module. Integration, E2E, benchmark and fuzz lanes keep
+`-count=1`, and a nightly that runs everything with `-count=1` is the
+backstop. A flag outside go test's cacheable set (`-benchtime`,
+`-coverprofile`, `-cpu`, `-failfast`, `-fullpath`, `-list`, `-outputdir`,
+`-parallel`, `-run`, `-short`, `-skip`, `-timeout`, `-v`) disables result
+caching for the run: `-count=1` by convention, but also `-bench`, `-shuffle`
+and `-args`. Build flags such as `-race`, `-tags` and `-trimpath` are part of
+the test binary's identity and keep caching.
+`go test -json` replays cached packages with their `run`/`pass` events, so
+inventories built from `-json` keep working.
+
+**The make hazard.** Content-derived times are years in the past. A tool that
+decides freshness by comparing a tracked input's time with an output restored
+from a cache (make, `tsc --build`, Cargo's local-crate fingerprints) sees every
+restored output as newer than its inputs and skips the rebuild even when the
+input changed. Checkout times hide this today because every input looks new.
+Before adopting this release, a caller checks its rules that compare tracked
+inputs with outputs restored from actions/cache or another job, and sets
+test-input-mtimes `off` on those jobs (or removes the restored outputs).
+Outputs a job builds itself are unaffected: they are newer than any stamped
+input. Two tracked files compared with each other (a checked-in generated file
+and its source) have an arbitrary but stable order, as with checkout times,
+whose order follows checkout order.
 
 ## Module proxy
 
@@ -359,7 +447,16 @@ directory, and the disabled contract that off mode has no key. Policy tests
 cover reruns, invalid inputs, safe pruning, long-running jobs, backend
 selection, manifest scoping and patterns, skipping the digest and the post-step
 walk when nothing is archived, and the npm registry cache's selection,
-precedence and health paths. No npm dependencies. `test/acceptance_test.py`
+precedence and health paths. The test-input-mtimes tests stamp real Git
+checkouts: two checkouts of a commit get identical times, a same-size edit
+changes only the edited file's time, a file changed after checkout is stamped
+from its new content and Git still reports it, the refreshed index reads
+clean, and untracked files, submodules, symbolic link targets, off mode,
+workspaces without Git and work trees outside the workspace are left alone.
+The test-results contract runs `go test` on a fixture that reads `testdata`:
+the result recorded in one checkout replays as `(cached)` in a fresh checkout
+of the same content, misses with checkout times, and re-executes and fails
+after a same-size fixture edit. No npm dependencies. `test/acceptance_test.py`
 (`python3 -m unittest discover -s test -p acceptance_test.py`) checks that a
 receipt is recorded only for a passing same-repository pull request merge
 commit and that verify reuses validation only for a matching receipt, against

@@ -142,6 +142,86 @@ jobs:
           test "$MATCHED" = "$EXPECTED"
           test -f "$GOCACHE/contract-sentinel"
           test ! -e "$GOCACHE/contract-stale"
+  # go test keys the files a test opens by path, size, mode and mtime. With
+  # content-derived mtimes a result recorded in one checkout replays in a fresh
+  # checkout of the same content, and a same-size fixture edit re-executes and
+  # fails. A private GOCACHE keeps results from earlier runs out of the probe.
+  test-results:
+    if: github.actor == 'ashtonian' && (github.event_name != 'pull_request' || github.event.pull_request.user.login == 'ashtonian')
+    runs-on: arc-go-ci-actions
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./
+        id: go
+        with:
+          go-version-file: fixtures/go.work
+          build-cache-backend: github
+          module-proxy: "off"
+          cache-mode: read-only
+          cache-key-prefix: test-results-${{ github.run_id }}-${{ github.run_attempt }}
+      - name: Record a result, then check the fixtures out again
+        working-directory: fixtures
+        env:
+          STATE: ${{ steps.go.outputs.test-input-mtimes }}
+          GOCACHE: ${{ runner.temp }}/test-results-cache
+        run: |
+          test "$STATE" = content
+          git diff-index --quiet HEAD --
+          # `! cmd` never trips errexit, hence the explicit ifs.
+          go test ./inputs | tee "$RUNNER_TEMP/record.log"
+          if grep -q '(cached)' "$RUNNER_TEMP/record.log"; then echo "the first run replayed a result" >&2; exit 1; fi
+          cd "$GITHUB_WORKSPACE"
+          rm -rf fixtures
+          git checkout -- fixtures
+          # Older than go test's two-second cutoff, so the miss below is the
+          # checkout time's, not the cutoff's.
+          sleep 3
+          go -C fixtures test ./inputs | tee "$RUNNER_TEMP/checkout.log"
+          if grep -q '(cached)' "$RUNNER_TEMP/checkout.log"; then echo "checkout times replayed a result" >&2; exit 1; fi
+      - uses: ./_test-inputs
+        with:
+          mode: content
+          cache-mode: read-only
+          go-version-file: fixtures/go.work
+      - name: Replay the result in the fresh checkout, then edit the fixture
+        working-directory: fixtures
+        env:
+          GOCACHE: ${{ runner.temp }}/test-results-cache
+        run: |
+          go test ./inputs | tee "$RUNNER_TEMP/replay.log"
+          grep -q '(cached)' "$RUNNER_TEMP/replay.log"
+          git diff-index --quiet HEAD --
+          python3 -c 'import os; print(os.stat("inputs/testdata/fixture.txt").st_mtime_ns)' > "$RUNNER_TEMP/alpha.mtime"
+          printf 'omega\n' > inputs/testdata/fixture.txt
+          touch -d @1700000000 untracked-probe
+      - uses: ./_test-inputs
+        with:
+          mode: content
+          cache-mode: read-only
+          go-version-file: fixtures/go.work
+      - name: A same-size edit re-executes and fails; untracked files keep their times
+        working-directory: fixtures
+        env:
+          GOCACHE: ${{ runner.temp }}/test-results-cache
+        run: |
+          python3 - "$RUNNER_TEMP/alpha.mtime" <<'PY'
+          import os, sys
+          alpha = int(open(sys.argv[1]).read())
+          omega = os.stat("inputs/testdata/fixture.txt").st_mtime_ns
+          assert omega != alpha, "the edited fixture kept its time"
+          assert os.stat("untracked-probe").st_mtime_ns == 1700000000 * 10**9, "an untracked file was re-timed"
+          PY
+          if go test ./inputs > "$RUNNER_TEMP/edit.log" 2>&1; then
+            cat "$RUNNER_TEMP/edit.log"
+            echo "the same-size edit passed" >&2
+            exit 1
+          fi
+          cat "$RUNNER_TEMP/edit.log"
+          if grep -q '(cached)' "$RUNNER_TEMP/edit.log"; then echo "the edit replayed a result" >&2; exit 1; fi
+          grep -q 'want "alpha' "$RUNNER_TEMP/edit.log"
   # A runner that provides a remote build cache: GOCACHEPROG_REMOTE_URL and
   # gocacheprog on PATH. The stub plugin is never started. The module archive
   # key hashes only the manifests under go-version-file's directory.
@@ -414,7 +494,7 @@ jobs:
           exit 17
   verify:
     if: always() && !cancelled() && github.actor == 'ashtonian'
-    needs: [seed, restore, disabled, failed, smoke, warm, remote, proxy, proxy-down, container]
+    needs: [seed, restore, disabled, failed, smoke, warm, remote, proxy, proxy-down, container, test-results]
     runs-on: arc-go-ci-actions
     timeout-minutes: 15
     steps:
@@ -428,6 +508,7 @@ jobs:
           PROXY: ${{ needs.proxy.result }}
           PROXY_DOWN: ${{ needs.proxy-down.result }}
           CONTAINER: ${{ needs.container.result }}
+          TEST_RESULTS: ${{ needs.test-results.result }}
           FAILED_KEY: ${{ needs.failed.outputs.key }}
           READER_KEY: ${{ needs.restore.outputs.key }}
         run: |
@@ -440,6 +521,7 @@ jobs:
           test "$PROXY" = success
           test "$PROXY_DOWN" = success
           test "$CONTAINER" = success
+          test "$TEST_RESULTS" = success
           test -n "$FAILED_KEY"
           test -n "$READER_KEY"
       - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0

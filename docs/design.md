@@ -58,6 +58,22 @@ sizes nothing uses. So the identity step computes the digest only when an
 archive needs a key, over the module go-version-file names rather than the
 whole workspace, and the post step walks only archived directories.
 
+Test results are reused across checkouts by making file modification times a
+function of content. go test keys the files a test reads by path, size, mode
+and mtime, and a checkout stamps everything with the time it was written, so
+with the remote backend every compiled object hit across runners while every
+package reading `testdata` re-executed, and consumers passed `-count=1`
+everywhere. Hashing content into the key would need a change to the go
+command; deriving the mtime from the bytes gives the same key from outside it.
+The derivation reads the bytes on disk rather than the index's blob IDs, so a
+file a step changed, or one a Git filter (LFS, eol, ident) renders differently
+from its blob, still gets the time of what Go reads. That read costs about a
+third of the stamping time on the largest checkout; the rest is Git's index
+refresh, which rehashes every re-timed file and cannot be skipped without
+writing Git's index format here. It is on by default because consumers own
+which lanes keep `-count=1`, and the cost of a stale cached result is bounded
+by the files Go can see; the make hazard is the reason it has an opt-out.
+
 The lifecycle hook is declared after actions/cache, so reverse post ordering
 prunes before upload. Its cutoff is relative to setup start, preserving objects
 used early in long jobs. Failed/cancelled jobs do not publish state; read-only

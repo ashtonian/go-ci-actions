@@ -36,6 +36,11 @@ inputs:
   module-proxy:
     description: "auto puts the runner's Go module proxy first in GOPROXY when it provides a ready one, and keeps modules out of the GitHub cache; off archives modules."
     default: auto
+  test-input-mtimes:
+    description: >-
+      content gives each tracked file in go-version-file's Git work tree an mtime derived from its bytes, so go test
+      replays results recorded in other checkouts; off keeps checkout times. cache-mode off implies off.
+    default: content
 outputs:
   go-version:
     description: Version installed by setup-go.
@@ -58,6 +63,9 @@ outputs:
   cache-hit:
     description: Exact key hit. Normally false with the GitHub backend's fresh run keys; true with the remote backend once the workload's module archive exists.
     value: ${{ steps.restore.outputs.cache-hit || 'false' }}
+  test-input-mtimes:
+    description: content when tracked files carry content-derived mtimes, off otherwise.
+    value: ${{ steps.test-inputs.outputs.state }}
 runs:
   using: composite
   steps:
@@ -86,6 +94,12 @@ runs:
         max-staleness-hours: ${{ inputs.max-staleness-hours }}
         build-cache-backend: ${{ inputs.build-cache-backend }}
         module-proxy: ${{ inputs.module-proxy }}
+    - uses: $/_test-inputs
+      id: test-inputs
+      with:
+        mode: ${{ inputs.test-input-mtimes }}
+        cache-mode: ${{ inputs.cache-mode }}
+        go-version-file: ${{ inputs.go-version-file }}
     - name: Restore Go cache
       if: steps.identity.outputs.paths != ''
       id: restore
