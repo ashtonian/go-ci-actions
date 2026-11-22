@@ -261,18 +261,19 @@ changed".
   `go-ignore`, never code inputs. Grep the tests for `ReadFile`, `Open` and
   `Glob` of relative paths before narrowing either list.
 - **Build configurations.** A repository that builds for several platforms or
-  tag sets lists them in `go-builds`, one per line as `KEY=VALUE` pairs from
-  GOOS, GOARCH, GOARM, GOAMD64, GOARM64, CGO_ENABLED, GOEXPERIMENT and
-  `tags=a,b` (for example `GOOS=linux GOARCH=amd64`, `GOOS=windows`,
-  `tags=integration`). `go-tags` is added to every line. The graphs are
-  unioned: a package that builds only for Windows or only under a tag is
-  owned and its dependents found, and an error only some configurations hit
-  (build constraints excluding every file) does not make it broken. With
-  `go-builds` empty there is one configuration, the runner's own platform;
-  when it is set, only the listed ones load, so list the runner's platform
-  too (a line with only `tags=`, or its GOOS and GOARCH) when it matters. Each
-  configuration is one `go list` over the workspace, about a second on a
-  dozen-module workspace.
+  tag sets lists them, and the scope loads one graph per `go-builds` line and
+  `go-tags` line, every pair, and unions them. `go-builds` lines are
+  `KEY=VALUE` pairs from GOOS, GOARCH, GOARM, GOAMD64, GOARM64, CGO_ENABLED,
+  GOEXPERIMENT and `tags=a,b` (added to every tag set), for example
+  `GOOS=linux GOARCH=amd64` and `GOOS=darwin GOARCH=arm64`; none is the
+  runner's own platform. `go-tags` lines are tag sets (`unit,integration`;
+  `-` is the empty set); one line is one set, and none is no tags. List each
+  set a constraint can tell apart: a superset does not cover a file behind
+  `!integration`. In the union a package that builds only for one platform or
+  tag set is owned and its dependents found, and an error only some
+  configurations hit (build constraints excluding every file) does not make
+  it broken. Each configuration is one `go list` over the workspace, about a
+  second on a dozen-module workspace once modules are in the cache.
 
 The job IDs in `jobs` are the workflow's job IDs, and the jobs gate on the
 scope job's output with `contains(needs.scope.outputs.jobs, '"<id>"')` (a
@@ -332,7 +333,8 @@ jobs:
 Inputs: `jobs` (required), `shared`, `full` (`false`), `full-label`
 (`full-ci`), `workflow` (the workflow file whose green runs are a push's base;
 default the running workflow, and a called workflow names its own file),
-`lookback` (20, 1-100), `go-directory` (`.`), `go-tags`, `go-builds`,
+`lookback` (20, 1-100), `go-directory` (`.`), `go-tags` (tag sets, one per
+line), `go-builds`,
 `go-ignore`, `go-owners` (JSON, glob to package directories) and `token`
 (`github.token`; needs `actions: read` for a push and `contents: read`).
 Outputs: `full` (`true` when every job and package is in scope), `jobs` (JSON

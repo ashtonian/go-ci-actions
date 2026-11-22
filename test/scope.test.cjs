@@ -54,20 +54,25 @@ test('the job IDs of a workflow file are its top-level jobs keys', () => {
   assert.deepEqual([...workflowJobs('jobs:\n    a:\n      b:\n    c:\n')], ['a', 'c']);
 });
 
-test('go-builds lists build configurations, with go-tags added to each', () => {
-  assert.deepEqual(parseBuilds('', 'e2e'), [{env: {}, tags: ['e2e']}]);
+test('the build configurations are every go-builds line with every go-tags tag set', () => {
+  assert.deepEqual(parseBuilds('', 'conformance e2e smoke'), [{env: {}, tags: ['conformance', 'e2e', 'smoke']}],
+    'one go-tags line is one tag set');
   assert.deepEqual(parseBuilds('', ''), [{env: {}, tags: []}]);
-  const builds = parseBuilds('# platforms\nGOOS=linux GOARCH=amd64\nGOOS=windows tags=integration,slow\nCGO_ENABLED=0 tags=e2e\n', 'e2e');
+  const builds = parseBuilds('# platforms\nGOOS=linux GOARCH=amd64\nGOOS=windows tags=slow\n', '-\nunit\nunit,integration\n');
   assert.deepEqual(builds, [
-    {env: {GOOS: 'linux', GOARCH: 'amd64'}, tags: ['e2e']},
-    {env: {GOOS: 'windows'}, tags: ['e2e', 'integration', 'slow']},
-    {env: {CGO_ENABLED: '0'}, tags: ['e2e']},
+    {env: {GOOS: 'linux', GOARCH: 'amd64'}, tags: []},
+    {env: {GOOS: 'linux', GOARCH: 'amd64'}, tags: ['unit']},
+    {env: {GOOS: 'linux', GOARCH: 'amd64'}, tags: ['unit', 'integration']},
+    {env: {GOOS: 'windows'}, tags: ['slow']},
+    {env: {GOOS: 'windows'}, tags: ['slow', 'unit']},
+    {env: {GOOS: 'windows'}, tags: ['slow', 'unit', 'integration']},
   ]);
-  assert.equal(describeBuild(builds[1]), 'GOOS=windows tags=e2e,integration,slow');
+  assert.equal(describeBuild(builds[5]), 'GOOS=windows tags=slow,unit,integration');
   assert.equal(describeBuild({env: {}, tags: []}), 'the runner platform');
   for (const bad of ['GOFLAGS=-mod=mod', 'GOOS', 'goos=linux', 'GOOS=linux;rm', 'PATH=/tmp']) {
     assert.throws(() => parseBuilds(bad, ''), /go-builds/, bad);
   }
+  assert.throws(() => parseBuilds('', 'unit;rm'), /go-tags/);
 });
 
 test('go-owners maps globs to the packages that read them', () => {

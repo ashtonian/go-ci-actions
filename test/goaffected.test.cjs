@@ -16,8 +16,8 @@ test('go list output parses object by object', () => {
 
 // A workspace of three modules: app imports lib/sub (and lib only from an
 // external test, and lib/winonly only on Windows), tool is independent,
-// lib/tagged builds only under the "integration" tag and lib/winonly only
-// for Windows.
+// lib/tagged builds only under the "integration" tag, lib/notint only
+// without it, and lib/winonly only for Windows.
 const FILES = {
   'go.work': 'go 1.22\n\nuse (\n\t./lib\n\t./app\n\t./tool\n)\n',
   'lib/go.mod': 'module example.com/lib\n\ngo 1.22\n',
@@ -32,6 +32,7 @@ const FILES = {
   'app/main.go': 'package main\n\nimport _ "example.com/lib/sub"\n\nfunc main() {}\n',
   'app/main_test.go': 'package main_test\n\nimport (\n\t"testing"\n\n\t_ "example.com/lib"\n)\n\nfunc TestMain(t *testing.T) {}\n',
   'lib/winonly/winonly_windows.go': 'package winonly\n',
+  'lib/notint/notint.go': '//go:build !integration\n\npackage notint\n',
   'app/main_windows.go': 'package main\n\nimport _ "example.com/lib/winonly"\n',
   'tool/go.mod': 'module example.com/tool\n\ngo 1.22\n',
   'tool/tool.go': 'package tool\n',
@@ -148,4 +149,8 @@ test('the graphs of several build configurations are unioned', needsGo, t => {
     {app: ['.'], lib: ['./winonly']});
   assert.deepEqual(affected(root, ['lib/sub/sub.go'], {builds: [host, windows, {tags: 'integration'}]}).modules,
     {app: ['.'], lib: ['./sub', './tagged']}, 'each configuration adds what it builds');
+  // A tag set is not covered by its superset when a constraint negates a tag.
+  assert.equal(affected(root, ['lib/notint/notint.go'], {builds: [{tags: 'integration'}]}).result.full, true);
+  assert.deepEqual(affected(root, ['lib/notint/notint.go'], {builds: [{tags: ''}, {tags: 'integration'}]}).modules,
+    {lib: ['./notint']});
 });
