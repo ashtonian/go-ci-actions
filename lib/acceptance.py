@@ -2,10 +2,12 @@
 """Reuse a pull request's passing validation for the push that merges the same tree.
 
 record runs in a pull request run once its validation jobs pass, and stores a
-receipt naming the tested merge commit's tree. verify runs first in the push
-that merges the pull request: when the pushed merge commit carries the same
-tree, the same workflow file and the same repository variables, the checks
-that already passed need not run again.
+receipt naming the tested merge commit's tree and which jobs passed. Jobs the
+run's scope left out are recorded as skipped, not passed. verify runs first in
+the push that merges the pull request: when the pushed merge commit carries the
+same tree, the same workflow file and the same repository variables, and every
+job the push requires passed in the pull request, those checks need not run
+again.
 """
 
 import datetime
@@ -34,6 +36,7 @@ API_TIMEOUT = 10
 LOOKUP_DEADLINE = 100
 RECEIPT_RETENTION_DAYS = 7
 WORKFLOW_PATH = re.compile(r"\.github/workflows/[A-Za-z0-9._-]+\.ya?ml")
+JOB_ID = re.compile(r"[A-Za-z_][A-Za-z0-9_-]*")
 
 
 def commit(ref="HEAD"):
@@ -88,7 +91,7 @@ def event(env):
 
 
 def build_receipt(env):
-    """The receipt for this pull request run; raises unless every validation job passed."""
+    """The receipt for this pull request run; raises when a validation job failed or was cancelled."""
     if env.get("GITHUB_EVENT_NAME") != "pull_request":
         raise ValueError("receipts record pull request validation only")
     pull = event(env)["pull_request"]
@@ -101,12 +104,30 @@ def build_receipt(env):
     results = json.loads(artifact.input_value("results") or "{}")
     if not isinstance(results, dict) or not results:
         raise ValueError("results must be the needs context of the validation jobs as JSON")
-    failed = sorted(name for name, job in results.items() if not isinstance(job, dict) or job.get("result") != "success")
+    outcome = {name: job.get("result") if isinstance(job, dict) else None for name, job in results.items()}
+    failed = sorted(name for name, result in outcome.items() if result not in ("success", "skipped"))
     if failed:
         raise ValueError("validation did not pass: " + ", ".join(failed))
     return {"version": RECEIPT_VERSION, "repository": repository, "workflow": workflow_path(env),
             "run_id": int(env["GITHUB_RUN_ID"]), "run_attempt": int(env["GITHUB_RUN_ATTEMPT"]),
-            "source": source, "variables": variables_digest(), "jobs": sorted(results)}
+            "source": source, "variables": variables_digest(),
+            "passed": sorted(name for name, result in outcome.items() if result == "success"),
+            "skipped": sorted(name for name, result in outcome.items() if result == "skipped")}
+
+
+def required_jobs():
+    """The jobs a push requires, or None for every job the receipt names.
+
+    A JSON array (a scope action's output) or one job name per line. An empty
+    array is a push whose scope selected nothing.
+    """
+    raw = artifact.input_value("required").strip()
+    if not raw:
+        return None
+    names = json.loads(raw) if raw.startswith("[") else [line.strip() for line in raw.splitlines() if line.strip()]
+    if not isinstance(names, list) or not all(isinstance(name, str) and JOB_ID.fullmatch(name) for name in names):
+        raise ValueError("required must name job IDs, as a JSON array or one per line")
+    return sorted(set(names))
 
 
 def record(env, store=None):
@@ -119,7 +140,8 @@ def record(env, store=None):
         artifact.setup()
         store = artifact.Store()
     artifact.upload(store, name, str(path), RECEIPT_RETENTION_DAYS, missing="error")
-    print(f"recorded {name} for tree {receipt['source']['tree']} ({', '.join(receipt['jobs'])})")
+    skipped = f"; skipped: {', '.join(receipt['skipped'])}" if receipt["skipped"] else ""
+    print(f"recorded {name} for tree {receipt['source']['tree']} (passed: {', '.join(receipt['passed']) or 'none'}{skipped})")
 
 
 class NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -176,6 +198,8 @@ def updated_at(run):
 
 def verify(env, api=None, receipts=fetch_receipt, now=time.time):
     """(reused, reason). Anything short of a matching receipt runs every check."""
+    # An invalid input is a workflow error, not missing evidence: it fails the step.
+    required = required_jobs()
     if env.get("GITHUB_EVENT_NAME") != "push":
         return False, "only a push reuses pull request validation"
     try:
@@ -218,6 +242,14 @@ def verify(env, api=None, receipts=fetch_receipt, now=time.time):
             differs.append("head")
         if differs:
             return False, "the receipt does not match this push (" + ", ".join(differs) + "): every check runs"
+        passed, skipped = receipt.get("passed"), receipt.get("skipped")
+        if not isinstance(passed, list) or not isinstance(skipped, list):
+            return False, "the receipt does not list its passed and skipped jobs: every check runs"
+        # Unscoped, every job the pull request recorded must have run and passed.
+        missing = sorted(set(skipped)) if required is None else [name for name in required if name not in passed]
+        if missing:
+            return False, (f"the pull request run did not pass {', '.join(missing)}: "
+                           f"{run.get('html_url', run['id'])}: every check runs")
         return True, f"tree {source['tree']} passed in {run.get('html_url', run['id'])}"
     except (KeyError, TypeError, ValueError, AttributeError, OSError, subprocess.SubprocessError,
             zipfile.BadZipFile, urllib.error.URLError) as error:

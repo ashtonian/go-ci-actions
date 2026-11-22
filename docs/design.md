@@ -86,6 +86,22 @@ registers a successful post-save with lookup-only and no fallback keys, avoiding
 a second download. The read-write warm-cache contract also verifies the published
 key output and the existence of its new saved entry.
 
+Change scope lives here rather than in each consumer because every repository
+needs the same three decisions and they are easy to get subtly wrong: what a
+change is measured from, which files a job depends on, and what to do when
+that cannot be known. A push is measured from the last green run of its
+workflow, not from `before`: a cancelled or failed predecessor would otherwise
+drop its changes from every later run. A pull request's receipt records the
+jobs its scope skipped as skipped, and a push reuses it only for jobs the
+receipt shows passed, because the two runs measure from different bases. For
+Go, a file maps to a package and the affected set follows the test-inclusive
+reverse dependency graph from `go list -e -test`, which sees cross-module
+imports in a workspace and test-only imports. Every unresolved case (a
+manifest, a file no package owns, an unloadable graph) widens to every
+package, and the nightly or dispatched full run is the backstop for inputs no
+static graph sees, such as a test reading a file from another package's
+directory at run time.
+
 Rollout: local policy/lifecycle tests, packaged Linux/macOS smoke and native
 cache lifecycle probes, small consumer canaries, then remaining repositories.
 Consumers pin only an exact action commit that passed. Existing commands,

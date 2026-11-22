@@ -7,7 +7,10 @@ inputs:
     description: "record, in a pull request job that needs every validation job; verify, first in a push."
     required: true
   results:
-    description: "record: the needs context of the validation jobs, toJSON(needs). Every job must have succeeded."
+    description: "record: the needs context of the validation jobs, toJSON(needs). Each job succeeded or was skipped; skipped ones are recorded as not passed."
+    default: ""
+  required:
+    description: "verify: the jobs this push would run, as a JSON array (a scope output) or one per line; reused only when each passed in the pull request. Empty requires every job the receipt names to have passed."
     default: ""
   variables:
     description: "toJSON(vars). A receipt recorded under other repository variables is not reused."
@@ -42,6 +45,7 @@ runs:
       env:
         INPUT_MODE: ${{ inputs.mode }}
         INPUT_RESULTS: ${{ inputs.results }}
+        INPUT_REQUIRED: ${{ inputs.required }}
         INPUT_VARIABLES: ${{ inputs.variables }}
         INPUT_WORKFLOW: ${{ inputs.workflow }}
         INPUT_NAME: ${{ inputs.name }}

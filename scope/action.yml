@@ -1,0 +1,67 @@
+name: scope
+description: >-
+  Which of a workflow's jobs a change needs, and for Go jobs which packages:
+  the changed packages and their reverse dependencies. A pull request is
+  measured from the base it merges into, a push from the last green run on its
+  branch. Anything the scope cannot decide runs everything.
+inputs:
+  jobs:
+    description: >-
+      JSON object of job ID to its inputs: an array of path globs, or
+      {"paths": [globs], "go": [package patterns]}. Go patterns are relative to
+      go-directory: ./..., ./dir/..., ./dir or ".".
+    required: true
+  shared:
+    description: "Path globs, one per line, of inputs every job shares (workflows, CI scripts, the toolchain); a change to one runs every job."
+    default: ""
+  full:
+    description: "true runs every job and package, as a schedule, a workflow_dispatch or a pull request with full-label does."
+    default: "false"
+  full-label:
+    description: "Pull request label that requests a full run."
+    default: full-ci
+  workflow:
+    description: "Workflow file whose green runs on a branch are a push's base. Empty is the running workflow; a called workflow names its own file."
+    default: ""
+  lookback:
+    description: "How many of the newest successful runs on the branch to consult for a push's base, from 1 through 100."
+    default: "20"
+  go-directory:
+    description: "Directory holding go.work or go.mod, relative to the workspace, for jobs that name Go packages."
+    default: "."
+  go-tags:
+    description: "Build tags for loading the package graph, so files behind them count."
+    default: ""
+  go-ignore:
+    description: "Path globs, one per line, of changed files that affect no Go package (documentation). Any other file no package owns affects every package."
+    default: ""
+  go-owners:
+    description: >-
+      JSON object of path glob to the Go package directories (relative to
+      go-directory, "." or "./a") whose code reads matching files at run time,
+      such as a test reading ../../docs/*.md; a change to one affects those
+      packages as well as the one holding it.
+    default: ""
+  token:
+    description: "Token that can read Actions runs (actions: read) and the repository (contents: read)."
+    default: ${{ github.token }}
+outputs:
+  full:
+    description: "true when every job and every Go package is in scope."
+  jobs:
+    description: "JSON array of the job IDs that run, in jobs order."
+  wide-jobs:
+    description: "JSON array of the selected jobs that check every package, not only the affected ones: a full run, a shared change, or one of the job's own paths changed."
+  base:
+    description: "The commit the change is measured from; empty for a full run."
+  files:
+    description: "Path of a file listing the changed paths, one per line; empty for a full run."
+  reason:
+    description: "Why the scope is what it is."
+  go-packages:
+    description: 'JSON object of module directory (relative to go-directory) to the package directories to check, relative to the module ("." or "./a"); "./..." for every package. Modules with nothing affected are absent.'
+  go-reason:
+    description: "Why the Go packages are what they are."
+runs:
+  using: node24
+  main: index.cjs

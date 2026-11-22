@@ -120,7 +120,14 @@ class AcceptanceTests(unittest.TestCase):
         receipt = self.receipt()
         self.assertEqual(receipt["source"], {"sha": self.fixture.merge, "parents": [self.fixture.base, self.fixture.head],
                                              "tree": self.fixture.tree})
-        self.assertEqual((receipt["workflow"], receipt["run_id"], receipt["jobs"]), (WORKFLOW, 41, ["lint", "test"]))
+        self.assertEqual((receipt["workflow"], receipt["run_id"], receipt["passed"], receipt["skipped"]),
+                         (WORKFLOW, 41, ["lint", "test"], []))
+
+    def test_receipt_records_jobs_the_scope_skipped_as_not_passed(self):
+        results = {"scope": {"result": "success"}, "lint": {"result": "success"}, "image": {"result": "skipped"}}
+        with patch.dict(os.environ, {"INPUT_RESULTS": json.dumps(results)}):
+            receipt = self.receipt()
+        self.assertEqual((receipt["passed"], receipt["skipped"]), (["lint", "scope"], ["image"]))
 
     def test_record_refuses_unproven_validation(self):
         cases = {
@@ -131,7 +138,9 @@ class AcceptanceTests(unittest.TestCase):
         for name, env in cases.items():
             with self.subTest(name), self.assertRaises(ValueError):
                 acceptance.build_receipt(env)
-        for results in ({"lint": {"result": "success"}, "test": {"result": "skipped"}}, {}):
+        for results in ({"lint": {"result": "success"}, "test": {"result": "failure"}},
+                        {"lint": {"result": "success"}, "test": {"result": "cancelled"}},
+                        {"lint": "success"}, {}):
             with self.subTest(results=results), patch.dict(os.environ, {"INPUT_RESULTS": json.dumps(results)}), \
                     self.assertRaises(ValueError):
                 acceptance.build_receipt(self.pull_env())
@@ -188,6 +197,34 @@ class AcceptanceTests(unittest.TestCase):
             with self.subTest(name):
                 (reused, reason), _ = self.verify(**case)
                 self.assertFalse(reused, reason)
+
+    def test_reuse_needs_every_required_job_to_have_passed(self):
+        results = {"scope": {"result": "success"}, "lint": {"result": "success"}, "image": {"result": "skipped"}}
+        with patch.dict(os.environ, {"INPUT_RESULTS": json.dumps(results)}):
+            receipt = self.receipt()
+        cases = {
+            "": (False, "image"),
+            '["lint"]': (True, ""),
+            "lint\nscope\n": (True, ""),
+            "[]": (True, ""),
+            '["lint", "image"]': (False, "image"),
+            '["test"]': (False, "test"),
+        }
+        for required, (expected, missing) in cases.items():
+            with self.subTest(required=required), patch.dict(os.environ, {"INPUT_REQUIRED": required}):
+                (reused, reason), _ = self.verify(receipt=receipt)
+                self.assertEqual(reused, expected, reason)
+                self.assertIn(missing, reason)
+        legacy = {key: value for key, value in receipt.items() if key not in ("passed", "skipped")}
+        with patch.dict(os.environ, {"INPUT_REQUIRED": '["lint"]'}):
+            (reused, reason), _ = self.verify(receipt=legacy)
+        self.assertFalse(reused, reason)
+
+    def test_invalid_required_fails_the_step(self):
+        for required in ('{"lint": 1}', '["lint", 2]', '[""]', "[not json"):
+            with self.subTest(required=required), patch.dict(os.environ, {"INPUT_REQUIRED": required}), \
+                    self.assertRaises(ValueError):
+                self.verify()
 
     def test_single_parent_push_runs_every_check(self):
         receipt = self.receipt()
