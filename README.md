@@ -333,7 +333,12 @@ is in scope) and `go-reason`. `go-args` runs from `go-directory` as one `go
 test` across a workspace's modules. Both forms name packages, which puts `go
 test` in package list mode: it caches test results, so with the remote cache
 an affected package whose test inputs did not change replays from cache
-rather than running (flags such as `-count=1` turn that off). The log lists the
+rather than running (flags such as `-count=1` turn that off). The lists hold
+every affected package of the graph loaded with `go-tags`, including packages
+that exist only under a tag or hold only test files. `go test` and `go vet
+-tags ...` take them all; a command that names packages without the tags, or
+`go build`, refuses those two kinds by name, so leave them out first (`go list
+-e` reports a tag-only package's error, and a test-only one has no `GoFiles`). The log lists the
 changed files, each job's decision and why, and the Go packages; the job
 summary repeats the decision. Invalid `jobs`, globs or patterns fail the step,
 and so does a job ID the workflow file does not define (a typo would otherwise
