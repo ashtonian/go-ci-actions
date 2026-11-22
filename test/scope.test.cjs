@@ -1,8 +1,8 @@
 'use strict';
 const {test} = require('node:test');
 const assert = require('node:assert/strict');
-const {decideBase, describeBuild, globRegExp, goPattern, parseBuilds, parseConfig, parseOwners, selectJobs, workflowJobs} =
-  require('../lib/scope.cjs');
+const {decideBase, describeBuild, globRegExp, goPattern, jobSelections, matcher, parseBuilds, parseConfig, parseOwners, selectJobs,
+  workflowJobs} = require('../lib/scope.cjs');
 
 const A = 'a'.repeat(40), B = 'b'.repeat(40), C = 'c'.repeat(40), H = 'd'.repeat(40);
 
@@ -27,6 +27,41 @@ test('globs: ** spans directories, * and ? stay in one segment, dots match', () 
   }
 });
 
+test('a "!" glob excludes what the other globs include, wherever it appears', () => {
+  // karsto's scopes: karsto/** without the web app, docs, tests and testdata.
+  const karsto = matcher(['karsto/**', '!karsto/web/**', '!**/*.md', '!**/*_test.go', '!**/testdata/**']);
+  for (const file of ['karsto/main.go', 'karsto/pkg/x/y.go']) assert.ok(karsto(file), file);
+  for (const file of ['karsto/web/app.ts', 'karsto/README.md', 'karsto/pkg/x_test.go', 'karsto/pkg/testdata/a.json', 'other/main.go']) {
+    assert.ok(!karsto(file), file);
+  }
+  assert.ok(matcher(['!docs/**', '**'])('src/a.go'), 'order does not matter');
+  assert.ok(!matcher(['!docs/**', '**'])('docs/a.md'));
+  assert.throws(() => matcher(['!**/*.md'], 'job docs'), /job docs has "!" excludes but nothing to include/);
+  assert.throws(() => matcher(['!/abs', 'a']), /glob/);
+  const config = parseConfig(JSON.stringify({go: {paths: ['karsto/**', '!karsto/web/**'], go: ['./...']}}), '.github/**\n!.github/ISSUE_TEMPLATE/**\n');
+  assert.ok(config.jobs[0].paths('karsto/a.go') && !config.jobs[0].paths('karsto/web/a.ts'));
+  assert.ok(config.shared('.github/workflows/ci.yml') && !config.shared('.github/ISSUE_TEMPLATE/bug.md'));
+  assert.throws(() => parseConfig(JSON.stringify({go: {paths: ['!karsto/web/**'], go: ['./...']}}), ''), /job go has "!" excludes/);
+});
+
+test('each selected job records what it checks', () => {
+  const config = parseConfig(JSON.stringify({
+    docs: ['docs/**'], test: {go: ['./...']}, image: {paths: ['Dockerfile'], go: ['./cmd/app']}, conformance: {go: ['./conformance/...']},
+  }), '.github/**');
+  const go = {full: false, reason: 'x', dirs: ['./a', './cmd/app'],
+    packages: [{importPath: 'example.com/m/a', dir: './a'}, {importPath: 'example.com/m/cmd/app', dir: './cmd/app'}]};
+  const files = ['docs/x.md', 'a/a.go'];
+  assert.deepEqual(jobSelections(config, selectJobs(config, {full: false, files, go}), go),
+    {docs: 'all', test: ['example.com/m/a', 'example.com/m/cmd/app'], image: ['example.com/m/cmd/app']});
+  const own = selectJobs(config, {full: false, files: ['Dockerfile'], go: {...go, dirs: [], packages: []}});
+  assert.deepEqual(jobSelections(config, own, {...go, dirs: [], packages: []}), {image: 'all'}, 'its own paths widen it');
+  const everything = {full: true, reason: 'manifest', dirs: [], packages: []};
+  assert.deepEqual(jobSelections(config, selectJobs(config, {full: false, files: ['a/a.go'], go: everything}), everything),
+    {test: 'all', image: 'all', conformance: 'all'});
+  assert.deepEqual(jobSelections(config, selectJobs(config, {full: true, files: [], go: null}), null),
+    {docs: 'all', test: 'all', image: 'all', conformance: 'all'});
+});
+
 test('Go package patterns match package directories', () => {
   const all = goPattern('./...'), cmd = goPattern('./cmd/...'), one = goPattern('./cmd/app'), root = goPattern('.');
   assert.ok(all('.') && all('./x/y'));
@@ -41,6 +76,10 @@ test('the configuration is validated', () => {
     '# shared\n.github/workflows/ci.yml\n\nscripts/**\n');
   assert.deepEqual(config.jobs.map(job => [job.id, job.usesGo]), [['lint', false], ['image', true], ['test', true]]);
   assert.ok(config.shared('scripts/x.sh') && !config.shared('README.md'));
+  assert.deepEqual(parseConfig('{"soak": {"paths": ["harness/**"], "go-binaries": ["./cmd/app"]}}', '').jobs[0].binaries, ['./cmd/app']);
+  for (const raw of ['{"a": {"go": ["./..."], "go-binaries": ["./cmd/app"]}}', '{"a": {"go-binaries": ["cmd/app"]}}']) {
+    assert.throws(() => parseConfig(raw, ''), Error, raw);
+  }
   for (const raw of ['', '[]', '{}', 'nope', '{"bad id": ["a"]}', '{"a": []}', '{"a": {"paths": []}}',
     '{"a": {"other": ["x"]}}', '{"a": "x"}', '{"a": ["/abs"]}', '{"a": {"go": ["cmd"]}}']) {
     assert.throws(() => parseConfig(raw, ''), Error, raw);
@@ -114,6 +153,8 @@ test('a push is measured from the newest green run on its branch', async () => {
     greenRun(7, {event: 'pull_request'}),
     greenRun(6, {head_repository: {full_name: 'fork/r'}}),
     greenRun(5, {conclusion: 'failure'}),
+    greenRun(51, {event: 'workflow_dispatch'}),
+    greenRun(52, {event: 'merge_group'}),
     greenRun(4, {head_sha: B, event: 'schedule'}),
     greenRun(3),
   ];
@@ -121,7 +162,7 @@ test('a push is measured from the newest green run on its branch', async () => {
   const result = await base('push', {}, {greenRuns: async branch => { asked = branch; return runs; }});
   assert.equal(asked, 'main');
   assert.equal(result.full, false);
-  assert.equal(result.base, B, 'the current run, other branches, pull requests, forks and failures are passed over');
+  assert.equal(result.base, B, 'the current run, other branches, pull requests, forks, failures and dispatched runs are passed over');
   assert.match(result.reason, /runs\/4$/);
   assert.equal((await base('push', {}, {greenRuns: async () => []})).full, true);
   assert.equal((await base('push', {}, {env: {GITHUB_REF: 'refs/tags/v1'}})).full, true);
@@ -211,7 +252,7 @@ function repository(t, files = {'README.md': 'base\n', 'docs/guide.md': 'guide\n
   fs.mkdirSync(origin);
   git(origin, 'init', '-q');
   git(origin, 'config', 'uploadpack.allowAnySHA1InWant', 'true');
-  write(origin, {...files, '.github/workflows/ci.yml': 'on: push\njobs:\n  docs:\n  image:\n  test:\n'});
+  write(origin, {'.github/workflows/ci.yml': 'on: push\njobs:\n  docs:\n  image:\n  test:\n', ...files});
   git(origin, 'add', '.');
   git(origin, 'commit', '-q', '-m', 'base');
   const base = git(origin, 'rev-parse', 'HEAD');
@@ -318,6 +359,7 @@ test('packaged action narrows Go jobs to the affected packages', async t => {
     inputs: {INPUT_JOBS: JSON.stringify(jobs), 'INPUT_GO-IGNORE': 'docs/**\n'}});
   assert.deepEqual(JSON.parse(outputs.jobs), ['test', 'docs']);
   assert.deepEqual(JSON.parse(outputs['wide-jobs']), ['docs']);
+  assert.deepEqual(JSON.parse(outputs.selections), {test: ['example.com/m/a', 'example.com/m/b'], docs: 'all'});
   assert.deepEqual(JSON.parse(outputs['go-packages']), {'.': ['./a', './b']});
   assert.equal(outputs['go-args'], 'example.com/m/a example.com/m/b');
   const unignored = await runScope(t, repo, {event: 'pull_request',
@@ -351,4 +393,87 @@ test('packaged action loads each go-builds configuration', async t => {
     inputs: {INPUT_JOBS: jobs, 'INPUT_GO-BUILDS': '\nGOOS=windows GOARCH=amd64\n'}});
   assert.deepEqual(JSON.parse(both.outputs['go-packages']), {'.': ['./w']});
   assert.match(both.stdout, /Go package graph: GOOS=windows GOARCH=amd64/);
+});
+
+test('packaged action reads job IDs from jobs-workflow, history from workflow', async t => {
+  const repo = repository(t, {'README.md': 'base\n', 'docs/guide.md': 'guide\n',
+    '.github/workflows/_validation.yml': 'on: workflow_call\njobs:\n  lint:\n  test:\n'}, {'docs/guide.md': 'changed\n'});
+  const pull = {pull_request: {head: {sha: repo.head}, base: {sha: repo.base}, labels: []}};
+  const jobs = JSON.stringify({lint: ['docs/**'], test: ['src/**']});
+  // The caller (the running workflow, ci.yml here) does not define lint.
+  await assert.rejects(runScope(t, repo, {event: 'pull_request', payload: pull, inputs: {INPUT_JOBS: jobs}}),
+    /ci\.yml does not define: lint\n/);
+  const {outputs} = await runScope(t, repo, {event: 'pull_request', payload: pull,
+    inputs: {INPUT_JOBS: jobs, 'INPUT_JOBS-WORKFLOW': '_validation.yml'}});
+  assert.deepEqual(JSON.parse(outputs.jobs), ['lint']);
+  // A push still reads the caller's green runs.
+  const push = await runScope(t, repo, {event: 'push', payload: {},
+    inputs: {INPUT_JOBS: jobs, 'INPUT_JOBS-WORKFLOW': '_validation.yml'},
+    routes: {'/repos/o/r/actions/workflows/ci.yml/runs': {workflow_runs: [
+      {id: 8, conclusion: 'success', head_branch: 'main', event: 'push', head_sha: repo.base,
+        head_repository: {full_name: 'o/r'}, html_url: 'https://github.com/o/r/actions/runs/8'}]}}});
+  assert.equal(push.outputs.base, repo.base);
+  await assert.rejects(runScope(t, repo, {event: 'pull_request', payload: pull,
+    inputs: {INPUT_JOBS: jobs, 'INPUT_JOBS-WORKFLOW': '../x.yml'}}), /jobs-workflow must be a file name/);
+});
+
+test('packaged action works on a checkout in a subdirectory beside a replaced sibling', async t => {
+  let go = true;
+  try { execFileSync('go', ['version'], {stdio: 'ignore'}); } catch { go = false; }
+  if (!go && !process.env.GITHUB_ACTIONS) return t.skip('go is not on PATH');
+  // estavelle's layout: the repository at estavelle/, and gox/ beside it,
+  // which its go.mod replaces.
+  const checkout = repository(t, {
+    'go.mod': 'module example.com/est\n\ngo 1.22\n\nrequire example.com/gox v0.0.0\n\nreplace example.com/gox => ../gox\n',
+    'a/a.go': 'package a\n\nimport _ "example.com/gox/lib"\n',
+    'b/b.go': 'package b\n\nimport _ "example.com/est/a"\n',
+    'docs/guide.md': 'guide\n',
+  }, {'a/a.go': 'package a\n\nimport _ "example.com/gox/lib"\n\nconst X = 1\n'});
+  const workspace = path.join(checkout.root, 'ws');
+  fs.mkdirSync(workspace);
+  fs.renameSync(checkout.workspace, path.join(workspace, 'estavelle'));
+  write(path.join(workspace, 'gox'), {'go.mod': 'module example.com/gox\n\ngo 1.22\n', 'lib/lib.go': 'package lib\n'});
+  const repo = {...checkout, workspace};
+  const jobs = JSON.stringify({test: {go: ['./...']}, docs: ['docs/**']});
+  const {outputs} = await runScope(t, repo, {event: 'pull_request',
+    payload: {pull_request: {head: {sha: checkout.head}, base: {sha: checkout.base}, labels: []}},
+    inputs: {INPUT_JOBS: jobs, INPUT_PATH: 'estavelle', 'INPUT_GO-IGNORE': 'docs/**'}});
+  assert.equal(outputs.base, checkout.base);
+  assert.deepEqual(JSON.parse(outputs.jobs), ['test']);
+  assert.deepEqual(JSON.parse(outputs['go-packages']), {'.': ['./a', './b']});
+  assert.equal(fs.readFileSync(outputs.files, 'utf8'), 'a/a.go\n', 'paths relative to the checkout');
+  await assert.rejects(runScope(t, repo, {event: 'pull_request', payload: {pull_request: {head: {sha: checkout.head}}},
+    inputs: {INPUT_JOBS: jobs, INPUT_PATH: '../elsewhere'}}), /path must stay inside the workspace/);
+});
+
+test('packaged action selects a binary job only when the binary\'s build closure changed', async t => {
+  let go = true;
+  try { execFileSync('go', ['version'], {stdio: 'ignore'}); } catch { go = false; }
+  if (!go && !process.env.GITHUB_ACTIONS) return t.skip('go is not on PATH');
+  const files = {
+    'go.mod': 'module example.com/m\n\ngo 1.22\n',
+    'cmd/app/main.go': 'package main\n\nimport _ "example.com/m/pkg/foo"\n\nfunc main() {}\n',
+    'pkg/foo/foo.go': 'package foo\n',
+    'pkg/foo/foo_test.go': 'package foo\n\nimport "testing"\n\nfunc TestFoo(t *testing.T) {}\n',
+    'pkg/foo/testdata/case.txt': 'case\n',
+    'pkg/bar/bar.go': 'package bar\n',
+    'harness/run.sh': '#!/bin/sh\n',
+    '.github/workflows/ci.yml': 'on: push\njobs:\n  test:\n  compliance:\n',
+  };
+  const jobs = JSON.stringify({test: {go: ['./...']}, compliance: {paths: ['harness/**'], 'go-binaries': ['./cmd/app']}});
+  const cases = [
+    [{'pkg/foo/foo_test.go': 'package foo\n\nimport "testing"\n\nfunc TestFoo(t *testing.T) { t.Log(1) }\n'}, ['test'], 'a test file'],
+    [{'pkg/foo/testdata/case.txt': 'changed\n'}, ['test'], 'testdata'],
+    [{'pkg/bar/bar.go': 'package bar\n\nconst X = 1\n'}, ['test'], 'a package the binary does not import'],
+    [{'pkg/foo/foo.go': 'package foo\n\nconst X = 1\n'}, ['test', 'compliance'], 'a package the binary builds'],
+    [{'harness/run.sh': '#!/bin/sh\nexit 0\n'}, ['compliance'], 'its own harness'],
+  ];
+  for (const [change, expected, name] of cases) {
+    const repo = repository(t, files, change);
+    const {outputs} = await runScope(t, repo, {event: 'pull_request',
+      payload: {pull_request: {head: {sha: repo.head}, base: {sha: repo.base}, labels: []}},
+      inputs: {INPUT_JOBS: jobs, 'INPUT_GO-IGNORE': 'harness/**'}});
+    assert.deepEqual(JSON.parse(outputs.jobs), expected, name);
+    if (expected.includes('compliance')) assert.equal(JSON.parse(outputs.selections).compliance, 'all', name);
+  }
 });

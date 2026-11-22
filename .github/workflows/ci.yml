@@ -32,6 +32,7 @@ jobs:
       CI_ARTIFACT_ENDPOINT: ${{ secrets.CI_ARTIFACT_ENDPOINT }}
     outputs:
       jobs: ${{ steps.accepted.outputs.remaining || steps.scope.outputs.jobs }}
+      selections: ${{ steps.scope.outputs.selections }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -55,6 +56,7 @@ jobs:
           mode: verify
           required: ${{ steps.scope.outputs.jobs }}
           base: ${{ steps.scope.outputs.base }}
+          selections: ${{ steps.scope.outputs.selections }}
           variables: ${{ toJSON(vars) }}
   smoke:
     needs: scope
@@ -658,4 +660,5 @@ jobs:
         with:
           mode: record
           results: ${{ toJSON(needs) }}
+          selections: ${{ needs.scope.outputs.selections }}
           variables: ${{ toJSON(vars) }}

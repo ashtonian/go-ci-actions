@@ -12,8 +12,11 @@ inputs:
   required:
     description: "verify: the jobs this push would run, as a JSON array (a scope output) or one per line; reused only when each passed in the pull request. Empty requires every job the receipt names to have passed."
     default: ""
+  selections:
+    description: "The scope action's selections output: what each job checks. record stores the pull request's; verify reuses a job only when the push's selection is covered by the pull request's. Without it, verify requires the merge's parent to be green and ignores base."
+    default: ""
   base:
-    description: "verify: the scope action's base output, the commit required was measured from. Reuse needs a green trunk run of the workflow on it; without it, the merge's parent must have one."
+    description: "verify: the scope action's base output, the commit required and selections were measured from. With selections, reuse needs a green trunk run of the workflow on it; without selections it is ignored and the merge's parent must have one."
     default: ""
   variables:
     description: "toJSON(vars). A receipt recorded under other repository variables is not reused."
@@ -21,6 +24,9 @@ inputs:
   workflow:
     description: "Workflow file whose pull request runs hold the receipts. Empty is the running workflow; a called workflow names its own file."
     default: ""
+  path:
+    description: "The checkout's directory under the workspace, as actions/checkout's path; the commit is read there."
+    default: "."
   name:
     description: "Receipt artifact name."
     default: acceptance
@@ -46,19 +52,18 @@ outputs:
   green_base:
     description: "verify: true when base (or, without it, the merge's parent) has a green run of the workflow on the default branch, false when not (no reuse), empty when unscoped or when verify stopped before asking."
     value: ${{ steps.acceptance.outputs.green_base }}
-  green_parent:
-    description: "Deprecated: the same value as green_base, kept for one minor release so v1.8.0 and v1.9.0 consumers can bump without edits; removed in v1.11.0."
-    value: ${{ steps.acceptance.outputs.green_base }}
 runs:
   using: composite
   steps:
     - id: acceptance
       shell: bash
+      working-directory: ${{ inputs.path }}
       env:
         INPUT_MODE: ${{ inputs.mode }}
         INPUT_RESULTS: ${{ inputs.results }}
         INPUT_REQUIRED: ${{ inputs.required }}
         INPUT_BASE: ${{ inputs.base }}
+        INPUT_SELECTIONS: ${{ inputs.selections }}
         INPUT_VARIABLES: ${{ inputs.variables }}
         INPUT_WORKFLOW: ${{ inputs.workflow }}
         INPUT_NAME: ${{ inputs.name }}

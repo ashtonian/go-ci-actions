@@ -393,10 +393,15 @@ changed".
   the checkout is not that merge, which can only widen the diff). A merge
   group is measured from its `base_sha`. A push to a branch is measured from
   the head of the newest successful run of the same workflow file on that
-  branch (events push, schedule, workflow_dispatch or merge_group, this
-  repository, not the running run; the newest `lookback` (20) are consulted),
-  so a push whose predecessor failed or was cancelled still checks that
-  predecessor's changes. A shallow checkout is enough: the base commit is
+  branch (this repository, not the running run; the newest `lookback` (20)
+  are consulted), so a push whose predecessor failed or was cancelled still
+  checks that predecessor's changes. Only `push` and `schedule` runs count:
+  a push ran the scope measured from an earlier base and a schedule ran
+  everything, while a `workflow_dispatch` can narrow its work through inputs
+  the scope never sees (a fast-runner dispatch), so a green one is no base.
+  acceptance's green-base check counts the same runs. A push run must not
+  narrow its jobs by anything but the scope's outputs, or this induction
+  breaks. A shallow checkout is enough: the base commit is
   fetched with the job token when it is missing.
 - **Full runs.** `workflow_dispatch`, a pull request labelled `full-label`
   (`full-ci`), `full: true`, a tag push and any other event run every job and
@@ -414,7 +419,12 @@ changed".
   the job checks every package; `wide-jobs` lists those jobs. A change to any `shared` path (workflow files, CI
   scripts, the files that pin the toolchain) runs every job. Globs are
   repository-relative: `**` as a whole segment spans directories, `*` and `?`
-  stay within a segment, dot files match, everything else is literal.
+  stay within a segment, dot files match, everything else is literal. In a
+  job's `paths`, `shared` and `go-ignore`, a glob starting with `!` excludes:
+  a file matches the list when it matches one of its globs and none of its
+  `!` globs, wherever they appear (dorny/paths-filter's `some-with-excludes`),
+  for example `["karsto/**", "!karsto/web/**", "!**/*.md"]`. A list of only
+  `!` globs fails the step.
 - **Go packages.** When a job names Go package patterns (`./...`, `./dir/...`,
   `./dir`, `.`, relative to `go-directory`), the scope loads the package graph
   of every module in the workspace with `go list -e -test` (with `go-tags`),
@@ -433,6 +443,18 @@ changed".
   `go-owners` entry: list documentation and other files no Go code reads in
   `go-ignore`, never code inputs. Grep the tests for `ReadFile`, `Open` and
   `Glob` of relative paths before narrowing either list.
+- **Binaries.** A job that tests built binaries (a compliance suite, a soak,
+  a release snapshot) names them in `go-binaries` (`["./cmd/estavelled"]`,
+  relative to `go-directory`) instead of `go`. It runs when a file the
+  binaries' build reads changed: the GoFiles, CgoFiles, SFiles, CFiles,
+  HFiles, SysoFiles and EmbedFiles of every package in their `go list -deps`
+  closure that lives in the checkout, their modules' go.mod and go.sum, and
+  go.work. A change to a test file or testdata does not select it; its own
+  harness goes in its `paths`. Every changed file counts, `go-ignore`d ones
+  too, since a binary can embed a document. A full Go scope (a manifest, an
+  unowned file, `go list` failing) or a closure that does not load selects it.
+  Its selection is `"all"`: it checks the binaries whole. A job names `go` or
+  `go-binaries`, not both.
 - **Build configurations.** A repository that builds for several platforms or
   tag sets lists them, and the scope loads one graph per `go-builds` line and
   `go-tags` line, every pair, and unions them. `go-builds` lines are
@@ -464,6 +486,7 @@ jobs:
       CI_ARTIFACT_ENDPOINT: ${{ secrets.CI_ARTIFACT_ENDPOINT }}
     outputs:
       jobs: ${{ steps.accepted.outputs.remaining || steps.scope.outputs.jobs }}
+      selections: ${{ steps.scope.outputs.selections }}
       wide-jobs: ${{ steps.scope.outputs.wide-jobs }}
       go-packages: ${{ steps.scope.outputs.go-packages }}
     steps:
@@ -492,6 +515,7 @@ jobs:
           mode: verify
           required: ${{ steps.scope.outputs.jobs }}
           base: ${{ steps.scope.outputs.base }}
+          selections: ${{ steps.scope.outputs.selections }}
           variables: ${{ toJSON(vars) }}
   test:
     needs: scope
@@ -506,14 +530,26 @@ jobs:
 
 Inputs: `jobs` (required), `shared`, `full` (`false`), `full-label`
 (`full-ci`), `workflow` (the workflow file whose green runs are a push's base;
-default the running workflow, and a called workflow names its own file),
-`lookback` (20, 1-100), `go-directory` (`.`), `go-tags` (tag sets, one per
-line), `go-builds`,
+default the running workflow, which in a reusable workflow is its caller),
+`jobs-workflow` (the workflow file that defines the job IDs in `jobs`;
+default `workflow`. A reusable workflow that scopes its own jobs while its
+caller's runs are the trunk history leaves `workflow` empty and names itself
+here; one whose own runs are the history, called by a release, sets
+`workflow` to itself instead),
+`lookback` (20, 1-100), `path` (`.`: the checkout's directory under the
+workspace, as actions/checkout's `path`; git runs there and the workflow
+files, every glob, `files` and `go-directory` are relative to it, so a
+repository whose go.mod replaces siblings such as `../gox` can be checked out
+at `estavelle/` beside them), `go-directory` (`.`), `go-tags` (tag sets, one
+per line), `go-builds`,
 `go-ignore`, `go-owners` (JSON, glob to package directories) and `token`
 (`github.token`; needs `actions: read` for a push and `contents: read`).
 Outputs: `full` (`true` when every job and package is in scope), `jobs` (JSON
 array of the selected job IDs, in `jobs` order), `wide-jobs` (the selected
-jobs that check every package), `base`, `files` (a file
+jobs that check every package), `selections` (JSON object of each selected
+job to what it checks: the affected Go packages its patterns match, as import
+paths, or `"all"` for a job that checks everything or has no Go patterns;
+pass it to acceptance record and verify), `base`, `files` (a file
 listing the changed paths, one per line; empty for a full run), `reason`,
 `go-packages` (JSON object of module directory, relative to `go-directory`, to
 the package directories to check relative to the module, `"./..."` for all;
@@ -528,10 +564,12 @@ every affected package of the graph loaded with `go-tags`, including packages
 that exist only under a tag or hold only test files. `go test` and `go vet
 -tags ...` take them all; a command that names packages without the tags, or
 `go build`, refuses those two kinds by name, so leave them out first (`go list
--e` reports a tag-only package's error, and a test-only one has no `GoFiles`). The log lists the
+-e` reports a tag-only package's error, and a test-only one has no `GoFiles`).
+golangci-lint reads its arguments as directories, not import paths: give it
+`go-packages`' directories, or map `go-args` through `go list -f '{{.Dir}}'`. The log lists the
 changed files, each job's decision and why, and the Go packages; the job
 summary repeats the decision. Invalid `jobs`, globs or patterns fail the step,
-and so does a job ID the workflow file does not define (a typo would otherwise
+and so does a job ID `jobs-workflow` does not define (a typo would otherwise
 leave that job never selected).
 
 When a job ran that should not have, or the other way round, read the scope
@@ -557,8 +595,9 @@ same workflow file over it again repeats work whose result is known.
   `acceptance.json`, as the run's `acceptance` artifact in SeaweedFS
   (seven-day retention): the repository, workflow file, run ID and attempt,
   the merge commit's SHA, parents and tree, a SHA-256 of the repository
-  variables, and the jobs that passed and the jobs that were skipped (by the
-  run's scope or any other condition) as separate lists.
+  variables, the jobs that passed and the jobs that were skipped (by the
+  run's scope or any other condition) as separate lists, and `selections`,
+  what each job checked (the scope's output).
 - **verify** runs first in the push. It outputs `reused=true` only when the
   push is the first attempt of a push to the default branch, the pushed commit
   is a merge whose first parent is the previous head (`before`), `base` (the
@@ -567,35 +606,51 @@ same workflow file over it again repeats work whose result is known.
   for the merge's second parent completed successfully within
   `max-age-hours` (6), that run's final attempt stored a
   receipt with the same tree, head, workflow file, variables digest, run ID
-  and attempt, and every job in `required` passed in it. `required` is the
-  push's own scope (the scope action's `jobs` output). Reuse is per job:
-  `remaining` lists the required jobs the push still runs, those the matching
-  receipt does not show passed (a job the pull request skipped, such as a
-  heavy suite it runs only with `full-ci`), so the rest are skipped even when
-  some must run; `reused` is true when none remain. Without a matching receipt
+  and attempt, and every job in `required` passed in it having checked at
+  least what the push's scope selects for it. `required` and `selections`
+  are the push's own scope (the scope action's `jobs` and `selections`
+  outputs). Reuse is per job: `remaining` lists the required jobs the push
+  still runs, those the matching receipt does not show passed (a job the pull
+  request skipped, such as a heavy suite it runs only with `full-ci`) or
+  passed on a narrower selection, so the rest are skipped even when some must
+  run; `reused` is true when none remain. Without a matching receipt
   on a green base `remaining` is every required job. With `required` empty,
   every job the receipt names must have passed and `remaining` is empty.
   Anything else, an API or storage error included, gives `reused=false` with
   the reason in `reason`, the log and the job summary, and the push's jobs
   run. Only invalid inputs fail the step.
 
-Why the base must be green. The push runs only `required` because every
-other job's inputs are unchanged since `base`, which is sound only if `base`
-passed them. The scope measures a push from the last green run of the
-workflow, so a change that broke a job since then puts that job in
-`required`, and if the pull request skipped it, in `remaining`: it runs. The
-green-base check re-verifies that premise. **Compute `required` with the
-scope action and pass its `base`**; a `required` measured from any other
-commit (the parent, the pull request's base) voids the guarantee, because a
-job failing on that commit may be left out. A failure with no input change
-(a flaky test, a new vulnerability advisory) is in no scope; the nightly full
-run catches it. `base` may be older than the parent: a path-filtered workflow
-that did not run there, a called workflow whose green runs on the branch are
-nightly ones, or a parent whose run had not finished. Without `base` (a
-caller bumped from v1.8.0 unedited, or a full scope with no green run to
-measure from), the merge's parent must have a green run instead, as in
-v1.8.0. Unscoped (no `required`), the pull request ran every job on this tree
-and nothing is checked.
+Why this is sound. The push runs only `required` because every other job's
+inputs are unchanged since `base`, the last green run of the workflow, so
+`base` must be green. A required job the pull request passed on this tree is
+reused only if the pull request checked at least what the push needs: a job
+narrowed to the affected packages (or apps, or checks) checks a set measured
+from the pull request's base, while the push's set is measured from `base`,
+and when a red commit sits between them the push's set is larger. Push X
+breaks package `state` and its run fails, so `base` stays before X; a pull
+request on X touches only `media` and its `go` job tests `media`; the push
+needs `state` and `media`, the receipt shows only `media`, and `go` runs. A
+job's selection covers another when it is `"all"` or a superset; a job the
+receipt has no selection for is not reused. With `base` the parent, both
+sets are the same diff and every passed job is reused, as v1.8.0's green
+parent did; with an older `base`, a job is reused only when the extra
+commits touched nothing the pull request did not check.
+
+**Compute `required` and `selections` with the scope action and pass its
+`base`.** A job that narrows its work some other way (a step that runs only
+some checks, a render of only the affected apps) puts what it checks in
+`selections` itself, in both the pull request and the push. Without
+`selections`, verify ignores `base` and requires the merge's parent to have a
+green run, as in v1.8.0. With `base` empty, as when the scope selected every
+job, each selection is `"all"` and there is nothing older to compare.
+Unscoped (no `required`), the pull request ran every job on this tree and
+nothing is checked. A failure with no input change (a flaky test, a new
+vulnerability advisory) is in no scope; the nightly full run catches it.
+
+**v1.10.0: do not pass `base`.** It reused a narrowed job against an older
+`base` without comparing selections, so a red commit between `base` and the
+parent could go unchecked. Upgrade to v1.11.0, or leave `base` out on v1.10.0
+(it then checks the parent as v1.8.0 did).
 
 Tree equality covers the workflow file and everything else in the repository.
 Repository variables are compared through their digest; secrets, the runner
@@ -621,7 +676,7 @@ cancelled:
       - uses: actions/checkout@<sha>
         with: {persist-credentials: false}
       - uses: ashtonian/go-ci-actions/acceptance@FULL_COMMIT_SHA
-        with: {mode: record, results: "${{ toJSON(needs) }}", variables: "${{ toJSON(vars) }}"}
+        with: {mode: record, results: "${{ toJSON(needs) }}", selections: "${{ needs.scope.outputs.selections }}", variables: "${{ toJSON(vars) }}"}
 ```
 
 The verify step sits in the scope job (above). A workflow without a scope job
@@ -630,8 +685,10 @@ other job on `needs.<job>.outputs.reused != 'true'` with `!cancelled()` so
 they still run when that job is skipped on pull requests.
 
 Inputs: `mode` (`record` or `verify`, required), `results` (record:
-`toJSON(needs)`), `required` (verify: a JSON array or one job ID per line),
-`base` (verify: the scope's `base` output),
+`toJSON(needs)`), `path` (`.`, the checkout's directory, as for scope),
+`required` (verify: a JSON array or one job ID per line),
+`base` (verify: the scope's `base` output), `selections` (both modes: the
+scope's `selections` output),
 `variables` (`toJSON(vars)`, default `{}`; pass the same in both modes),
 `workflow` (the workflow file holding the receipts, default the running
 workflow; a workflow called with `workflow_call` sees its caller's file, so it
@@ -643,11 +700,10 @@ and `CI_ARTIFACT_ENDPOINT` (a repository secret). Outputs (verify): `reused`,
 `remaining` (JSON array of the required jobs to run; the scope job's `jobs`
 output is `remaining || scope.jobs`, since verify does not run on pull
 requests), `reason` and `green_base` (`true`, `false`, or empty when unscoped
-or when verify stopped before asking). `green_parent` is a deprecated
-copy of `green_base`, kept for one minor release so v1.8.0 and v1.9.0
-consumers can bump without edits, and removed in v1.11.0. Such a consumer,
-passing no `base`, keeps v1.8.0's green-parent check; passing `base` lets
-path-filtered and called workflows reuse.
+or when verify stopped before asking). v1.10.0's `green_parent`, a
+deprecated copy of `green_base`, is gone; read `green_base`. A consumer that
+passes no `selections` keeps v1.8.0's check on the merge's parent; passing
+`base` and `selections` lets path-filtered and called workflows reuse.
 
 The receipt proves only what the run's own validation proved. Possession of
 an archive is not trusted on its own: the run lookup, its conclusion and the
@@ -761,7 +817,8 @@ the changed paths, a change to ci.yml runs everything, and documentation-only
 changes run nothing. Pull requests record a receipt; the merge push reuses it.
 workflow_dispatch runs everything.
 
-Release signed commits with immutable version tags. Upgrade consumers through
+Release signed commits with immutable version tags, and note each release in
+[CHANGELOG.md](CHANGELOG.md). Upgrade consumers through
 reviewed SHA changes and roll back to the previous SHA. Measure cold, warm,
 source-change, dependency-change and matrix behavior before cache policy
 changes; do not infer a speedup from unrelated repositories.

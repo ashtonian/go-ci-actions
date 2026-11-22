@@ -8,11 +8,14 @@ inputs:
   jobs:
     description: >-
       JSON object of job ID to its inputs: an array of path globs, or
-      {"paths": [globs], "go": [package patterns]}. Go patterns are relative to
-      go-directory: ./..., ./dir/..., ./dir or ".".
+      {"paths": [globs], "go": [package patterns], "go-binaries": [main
+      packages]}. go-binaries selects a job that tests built binaries only when
+      a file their build reads changed. A "!" glob excludes: a
+      file selects the job when it matches a glob and no "!" glob. Go patterns
+      are relative to go-directory: ./..., ./dir/..., ./dir or ".".
     required: true
   shared:
-    description: "Path globs, one per line, of inputs every job shares (workflows, CI scripts, the toolchain); a change to one runs every job."
+    description: "Path globs, one per line, of inputs every job shares (workflows, CI scripts, the toolchain); a change to one runs every job. A \"!\" glob excludes."
     default: ""
   full:
     description: "true runs every job and package, as a schedule, a workflow_dispatch or a pull request with full-label does."
@@ -23,11 +26,17 @@ inputs:
   workflow:
     description: "Workflow file whose green runs on a branch are a push's base. Empty is the running workflow; a called workflow names its own file."
     default: ""
+  jobs-workflow:
+    description: "Workflow file that defines the job IDs in jobs. Empty is workflow; a reusable workflow whose caller's runs are the history (workflow empty) names its own file here."
+    default: ""
   lookback:
     description: "How many of the newest successful runs on the branch to consult for a push's base, from 1 through 100."
     default: "20"
+  path:
+    description: "The checkout's directory under the workspace, as actions/checkout's path: git runs there, and the workflow files, every glob and go-directory are relative to it."
+    default: "."
   go-directory:
-    description: "Directory holding go.work or go.mod, relative to the workspace, for jobs that name Go packages."
+    description: "Directory holding go.work or go.mod, relative to path, for jobs that name Go packages."
     default: "."
   go-tags:
     description: 'Build tag sets for loading the package graph, one per line ("unit,integration"; "-" is the empty set), so files behind them count. Each is loaded for every go-builds line and the graphs unioned.'
@@ -59,6 +68,8 @@ outputs:
     description: "JSON array of the job IDs that run, in jobs order."
   wide-jobs:
     description: "JSON array of the selected jobs that check every package, not only the affected ones: a full run, a shared change, or one of the job's own paths changed."
+  selections:
+    description: 'JSON object of each selected job ID to what it checks: the affected Go packages its patterns match, as import paths, or "all". Pass it to acceptance record and verify, so a push reuses a job only when the pull request checked at least as much.'
   base:
     description: "The commit the change is measured from; empty for a full run."
   files:

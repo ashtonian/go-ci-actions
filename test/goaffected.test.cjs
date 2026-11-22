@@ -5,7 +5,8 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const {execFileSync} = require('node:child_process');
-const {LIST_FIELDS, affectedPackages, byModule, importArgs, parseStream, rootDirs} = require('../lib/goaffected.cjs');
+const {CLOSURE_FIELDS, LIST_FIELDS, affectedPackages, binaryClosure, byModule, importArgs, parseStream, rootDirs} =
+  require('../lib/goaffected.cjs');
 
 test('go list output parses object by object', () => {
   const text = '{\n\t"ImportPath": "a",\n\t"Module": {\n\t\t"Path": "a"\n\t}\n}\n{\n\t"ImportPath": "b"\n}\n';
@@ -153,4 +154,21 @@ test('the graphs of several build configurations are unioned', needsGo, t => {
   assert.equal(affected(root, ['lib/notint/notint.go'], {builds: [{tags: 'integration'}]}).result.full, true);
   assert.deepEqual(affected(root, ['lib/notint/notint.go'], {builds: [{tags: ''}, {tags: 'integration'}]}).modules,
     {lib: ['./notint']});
+});
+
+test('a binary\'s closure holds its non-test sources, embeds and manifests, not tests or testdata', needsGo, t => {
+  const root = workspace(t);
+  const env = {...process.env, GOFLAGS: '', GOPROXY: 'off', GOTOOLCHAIN: 'local', GOWORK: path.join(root, 'go.work')};
+  const closure = patterns => binaryClosure(root, root, parseStream(execFileSync('go',
+    ['list', '-e', '-deps', '-json=' + CLOSURE_FIELDS, ...patterns], {cwd: root, env, encoding: 'utf8'})));
+  const app = closure(['example.com/app']);
+  const has = file => app.files.has(path.join(root, file));
+  for (const file of ['app/main.go', 'lib/sub/sub.go', 'app/go.mod', 'app/go.sum', 'lib/go.mod', 'go.work']) {
+    assert.ok(has(file), file);
+  }
+  for (const file of ['app/main_test.go', 'lib/lib.go', 'lib/sub/testdata/case/input.txt', 'tool/tool.go', 'lib/assets/static/page.html']) {
+    assert.ok(!has(file), file + ' is not built into app');
+  }
+  assert.ok(closure(['example.com/lib/assets']).files.has(path.join(root, 'lib/assets/static/page.html')), 'embedded files are');
+  assert.equal(app.broken, '');
 });

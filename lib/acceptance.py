@@ -38,8 +38,10 @@ LOOKUP_DEADLINE = 100
 RECEIPT_RETENTION_DAYS = 7
 WORKFLOW_PATH = re.compile(r"\.github/workflows/[A-Za-z0-9._-]+\.ya?ml")
 JOB_ID = re.compile(r"[A-Za-z_][A-Za-z0-9_-]*")
-# Events whose successful runs on the default branch prove a commit green.
-TRUNK_EVENTS = {"push", "schedule", "workflow_dispatch", "merge_group"}
+# Events whose successful runs on the default branch prove a commit green: a
+# push runs the scope measured from a green base, a schedule runs everything.
+# A workflow_dispatch can narrow its work through inputs the scope never sees.
+TRUNK_EVENTS = {"push", "schedule"}
 
 
 def commit(ref="HEAD"):
@@ -115,7 +117,8 @@ def build_receipt(env):
             "run_id": int(env["GITHUB_RUN_ID"]), "run_attempt": int(env["GITHUB_RUN_ATTEMPT"]),
             "source": source, "variables": variables_digest(),
             "passed": sorted(name for name, result in outcome.items() if result == "success"),
-            "skipped": sorted(name for name, result in outcome.items() if result == "skipped")}
+            "skipped": sorted(name for name, result in outcome.items() if result == "skipped"),
+            "selections": job_selections()}
 
 
 def required_jobs():
@@ -131,6 +134,39 @@ def required_jobs():
     if not isinstance(names, list) or not all(isinstance(name, str) and JOB_ID.fullmatch(name) for name in names):
         raise ValueError("required must name job IDs, as a JSON array or one per line")
     return sorted(set(names))
+
+
+def job_selections():
+    """What each job checks, from the scope's selections output, or None.
+
+    A JSON object of job ID to "all" or a list of items (import paths, or
+    whatever unit a job narrows its work to).
+    """
+    raw = artifact.input_value("selections").strip()
+    if not raw:
+        return None
+    selections = json.loads(raw)
+    if not isinstance(selections, dict) or not all(
+            JOB_ID.fullmatch(job) and (value == "all" or isinstance(value, list) and all(isinstance(item, str) for item in value))
+            for job, value in selections.items()):
+        raise ValueError('selections must map job IDs to "all" or a list of strings: the scope action\'s selections output')
+    return {job: value if value == "all" else sorted(set(value)) for job, value in selections.items()}
+
+
+def covers(recorded, needed):
+    """Whether a pull request's selection for a job checked all a push's selection needs.
+
+    No recorded entry is no evidence: the job may have run in a reduced mode
+    the scope did not select (lint only, say), so it covers only an empty
+    selection.
+    """
+    if recorded == "all":
+        return True
+    if needed == "all":
+        return False
+    if recorded is None:
+        return not needed
+    return set(needed) <= set(recorded)
 
 
 def record(env, store=None):
@@ -231,6 +267,7 @@ def verify(env, api=None, receipts=fetch_receipt, now=time.time):
     # An invalid input is a workflow error, not missing evidence: it fails the step.
     required = required_jobs()
     base = scope_base()
+    selections = job_selections()
     if env.get("GITHUB_EVENT_NAME") != "push":
         return Verdict(False, "only a push reuses pull request validation")
     green_base = None
@@ -254,12 +291,20 @@ def verify(env, api=None, receipts=fetch_receipt, now=time.time):
         # required list measured from a red commit could leave out the job
         # that is failing, and reusing the rest would make this push the
         # next green base with that failure unchecked.
-        # Without base, as in a v1.8.0 caller, the parent stands in for it.
-        checked = base or (source["parents"][0] if required is not None else None)
-        if checked is not None:
+        # The push needs only the required jobs because every other job's
+        # inputs are unchanged since base, so base must be green. Measured
+        # from a base older than the parent, a narrowed job's selection can
+        # be wider than what the pull request checked, so an older base is
+        # used only with selections to compare; without them the parent
+        # must be green, as in v1.8.0.
+        checked = None
+        if required is not None:
+            checked = base if selections is not None else source["parents"][0]
+        if checked:
             green_base = bool(green_runs(api, workflow, checked, branch, repository, env.get("GITHUB_RUN_ID", "")))
             if not green_base:
-                what = f"the scope's base {checked}" if base else f"the merge's parent {checked} (no base given)"
+                what = f"the scope's base {checked}" if selections is not None \
+                    else f"the merge's parent {checked} (no selections given)"
                 return Verdict(False, f"{what} has no green run of {Path(workflow).name}: "
                                "the push runs its scoped checks", False)
         runs = api.get(f"actions/workflows/{urllib.parse.quote(Path(workflow).name)}/runs",
@@ -299,9 +344,15 @@ def verify(env, api=None, receipts=fetch_receipt, now=time.time):
                 return Verdict(False, f"the pull request run did not pass {', '.join(sorted(set(skipped)))}: "
                                f"{where}: every check runs", green_base)
             return Verdict(True, f"tree {source['tree']} passed in {where}", green_base)
-        # A job that passed on this tree needs no second run, whatever else
-        # the push requires; the rest run.
-        remaining = [name for name in required if name not in passed]
+        # A job that passed on this tree needs no second run, provided it
+        # checked at least what the push's scope selects for it; the rest run.
+        recorded = receipt.get("selections")
+        if selections is not None:
+            recorded = recorded if isinstance(recorded, dict) else {}
+            remaining = [name for name in required
+                         if name not in passed or not covers(recorded.get(name), selections.get(name, "all"))]
+        else:
+            remaining = [name for name in required if name not in passed]
         if remaining:
             reusable = [name for name in required if name in passed]
             return Verdict(False, f"tree {source['tree']} passed {', '.join(reusable) or 'none of the required jobs'} in "
