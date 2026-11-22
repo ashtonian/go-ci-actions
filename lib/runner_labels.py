@@ -24,6 +24,8 @@ import re
 import sys
 import urllib.parse
 
+from workflow_outline import flow_entries, flow_list, parse, unquote
+
 # GitHub-hosted images: valid wherever the account may use hosted runners.
 HOSTED = ("ubuntu-*", "windows-*", "macos-*")
 CONNECT_TIMEOUT = 3
@@ -32,11 +34,6 @@ MAX_RESPONSE = 1024 * 1024
 MAX_BUNDLE = 64 * 1024
 REPOSITORY = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})/[A-Za-z0-9._-]{1,100}")
 
-# A workflow outline parser:
-# enough YAML for the keys this reads, with the line each sits on, and no
-# dependency outside the standard library.
-KEY = re.compile(r"""^(?P<key>"[^"]*"|'[^']*'|[^\s#"'][^:#]*?)\s*:(?:\s+(?P<rest>.*))?$""")
-BLOCK_SCALAR = re.compile(r"^[|>][-+0-9]*$")
 QUOTED = re.compile(r"'((?:[^']|'')*)'")
 MATRIX = re.compile(r"\bmatrix\.([A-Za-z_][A-Za-z0-9_-]*)")
 RESULT_BEFORE = ("${{", "||", "&&", "(")
@@ -45,126 +42,6 @@ RESULT_AFTER = ("}}", "||", "&&", ")")
 
 class Unavailable(Exception):
     """No list of labels to check against."""
-
-
-class Node:
-    """One mapping entry (`key` set) or sequence item (`key` None) and what it holds."""
-
-    def __init__(self, line, indent, key, value):
-        self.line = line
-        self.indent = indent
-        self.key = key
-        self.value = value
-        self.children = []
-
-    def get(self, key):
-        return next((c for c in self.children if c.key == key), None)
-
-    def items(self):
-        return [c for c in self.children if c.key is None]
-
-
-def split_comment(text):
-    """Return a line's text without its comment, ignoring a `#` inside quotes."""
-    quote = None
-    for i, ch in enumerate(text):
-        if quote:
-            if ch == quote:
-                quote = None
-        elif ch in "\"'":
-            quote = ch
-        elif ch == "#" and (i == 0 or text[i - 1] in " \t"):
-            return text[:i].rstrip()
-    return text.rstrip()
-
-
-def unquote(value):
-    if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
-        return value[1:-1]
-    return value
-
-
-def parse(text):
-    """Parse the YAML outline into a root Node."""
-    root = Node(0, -1, None, "")
-    stack = [root]
-    scalar_indent = None
-
-    def attach(node):
-        while True:
-            top = stack[-1]
-            if top.indent < node.indent:
-                break
-            # A sequence may sit at its key's own indent (`steps:` then `- run: x`).
-            if top.indent == node.indent and node.key is None and top.key is not None and not top.value:
-                break
-            stack.pop()
-        stack[-1].children.append(node)
-        stack.append(node)
-
-    for n, raw in enumerate(text.splitlines(), 1):
-        if not raw.strip():
-            continue
-        indent = len(raw) - len(raw.lstrip(" "))
-        if scalar_indent is not None:
-            if indent > scalar_indent:
-                continue
-            scalar_indent = None
-        body = raw.strip()
-        if body.startswith("#"):
-            continue
-        if body == "-" or body.startswith("- "):
-            content = body[1:].lstrip()
-            item = Node(n, indent, None, "")
-            attach(item)
-            if not content:
-                continue
-            if not KEY.match(content):
-                value = split_comment(content)
-                item.value = unquote(value)
-                if BLOCK_SCALAR.match(value):
-                    scalar_indent = indent
-                continue
-            indent += len(body) - len(content)
-            body = content
-        m = KEY.match(body)
-        if not m:
-            continue
-        value = split_comment(m.group("rest") or "")
-        attach(Node(n, indent, unquote(m.group("key")), unquote(value)))
-        if BLOCK_SCALAR.match(value):
-            scalar_indent = indent
-    return root
-
-
-def flow_list(value):
-    return [unquote(part.strip()) for part in value.strip("[]").split(",") if part.strip()]
-
-
-def flow_entries(value):
-    """{key: value} of a one-line flow mapping (`{group: g, labels: [a, b]}`), split at the commas
-    outside brackets and quotes."""
-    entries, depth, start, quote, body = {}, 0, 0, None, value.strip()[1:-1]
-    parts = []
-    for i, ch in enumerate(body):
-        if quote:
-            if ch == quote:
-                quote = None
-        elif ch in "\"'":
-            quote = ch
-        elif ch in "[{":
-            depth += 1
-        elif ch in "]}":
-            depth -= 1
-        elif ch == "," and depth == 0:
-            parts.append(body[start:i])
-            start = i + 1
-    parts.append(body[start:])
-    for part in parts:
-        key, _, item = part.partition(":")
-        if key.strip():
-            entries[unquote(key.strip())] = item.strip()
-    return entries
 
 
 def expression_labels(expression):

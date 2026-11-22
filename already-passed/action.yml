@@ -21,7 +21,9 @@ inputs:
     default: ${{ github.token }}
 outputs:
   passed:
-    description: "true when the newest earlier run on this commit that ran the jobs passed them all; false otherwise."
+    description: "true when, for each named job, the newest earlier run on this commit that ran it passed it; false otherwise."
+  passed-jobs:
+    description: "JSON array of the named jobs that passed so, each on its own evidence: one call can gate several jobs."
   reason:
     description: "Why."
 runs:

@@ -22,7 +22,7 @@ test('the newest run on this commit that ran the jobs decides', async () => {
     [run(1), [job('conformance (emqx)', 'failure')]],
   ]);
   assert.equal(passed.passed, true);
-  assert.match(passed.reason, /runs\/2$/);
+  assert.match(passed.reason, /^conformance: passed .*runs\/2$/);
   assert.deepEqual(passed.asked, [3, 2], 'older runs are not consulted');
   const failed = await decide([[run(2), [job('conformance (emqx)', 'success'), job('conformance (hivemq)', 'failure')]]]);
   assert.equal(failed.passed, false);
@@ -45,6 +45,29 @@ test('without a run that ran the jobs on this commit, they run', async () => {
   assert.equal((await decide([])).passed, false);
   assert.equal((await decide([[run(2), [job('models', 'success'), job('conformance (emqx)', 'skipped')]]])).passed, false);
   assert.equal((await decide([[run(2), [job('conformancex', 'success')]]])).passed, false, 'a different job name');
+});
+
+test('each job is decided by the newest run that ran it', async () => {
+  // Run 3 ran only fuzz; stress last ran in run 2.
+  const history = [
+    [run(3), [job('fuzz', 'success'), job('stress', 'skipped')]],
+    [run(2), [job('fuzz', 'failure'), job('stress', 'success')]],
+    [run(1), [job('stress', 'failure')]],
+  ];
+  const both = await decide(history, ['fuzz', 'stress']);
+  assert.equal(both.passed, true);
+  assert.deepEqual(both.passedJobs, ['fuzz', 'stress']);
+  assert.match(both.reason, /fuzz: passed .*runs\/3; stress: passed .*runs\/2$/);
+  assert.deepEqual(both.asked, [3, 2], 'the search stops once every job is decided');
+  // A run that ran only some of the jobs vouches for those only.
+  const partial = await decide([[run(2), [job('fuzz', 'success'), job('stress', 'skipped')]]], ['fuzz', 'stress']);
+  assert.equal(partial.passed, false);
+  assert.deepEqual(partial.passedJobs, ['fuzz']);
+  assert.match(partial.reason, /stress: no earlier run/);
+  const changed = await decide([[run(3), [job('fuzz', 'success')]], [run(2, 'b'.repeat(40)), [job('stress', 'success')]]],
+    ['fuzz', 'stress']);
+  assert.deepEqual([changed.passed, changed.passedJobs], [false, ['fuzz']]);
+  assert.match(changed.reason, /stress: the commit changed since .*runs\/2$/);
 });
 
 test('names cover their matrix variants only', () => {
@@ -92,7 +115,8 @@ async function runAction(t, routes) {
     [path.join(__dirname, '../already-passed/index.cjs')], {env, encoding: 'utf8'},
     (error, out, stderr) => (error ? reject(new Error(stderr || error.message)) : resolve(out))));
   const output = fs.readFileSync(env.GITHUB_OUTPUT, 'utf8');
-  return {stdout, requests, passed: /passed<<[^\n]+\n(true|false)\n/.exec(output)[1]};
+  return {stdout, requests, passed: /^passed<<[^\n]+\n(true|false)\n/m.exec(output)[1],
+    passedJobs: JSON.parse(/^passed-jobs<<[^\n]+\n(.*)\n/m.exec(output)[1])};
 }
 
 test('packaged action reads the workflow history and skips the running run', async t => {
@@ -101,6 +125,7 @@ test('packaged action reads the workflow history and skips the running run', asy
     '/repos/o/r/actions/runs/2/jobs': {jobs: [job('conformance (emqx)', 'success')]},
   });
   assert.equal(result.passed, 'true');
+  assert.deepEqual(result.passedJobs, ['conformance']);
   assert.deepEqual(result.requests[0].query, {event: 'schedule', branch: 'master', status: 'completed', per_page: '10'});
   assert.equal(result.requests[0].auth, 'Bearer tok');
   assert.deepEqual(result.requests.map(r => r.path), ['/repos/o/r/actions/workflows/nightly.yml/runs', '/repos/o/r/actions/runs/2/jobs']);

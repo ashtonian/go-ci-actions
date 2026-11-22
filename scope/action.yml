@@ -69,7 +69,11 @@ outputs:
   wide-jobs:
     description: "JSON array of the selected jobs that check every package, not only the affected ones: a full run, a shared change, or one of the job's own paths changed."
   selections:
-    description: 'JSON object of each selected job ID to what it checks: the affected Go packages its patterns match, as import paths, or "all". Pass it to acceptance record and verify, so a push reuses a job only when the pull request checked at least as much.'
+    description: 'JSON object of each selected job ID to what it checks: the affected Go packages its patterns match, as import paths, or "all". Pass it to acceptance verify with parent-selections, so a push reuses a job only when the pull request checked at least as much.'
+  parent-selections:
+    description: "A push of a merge commit: selections measured from the merge's first parent, as the pull request's run measured them over the same tree. Pass it to acceptance verify. Empty for other events, a single-parent push, or when that measurement failed."
+  parent-files:
+    description: "A push of a merge commit: path of a file listing the paths changed since the merge's first parent, one per line, for a caller that derives its own selections from files. Empty when parent-selections is."
   base:
     description: "The commit the change is measured from; empty for a full run."
   files:

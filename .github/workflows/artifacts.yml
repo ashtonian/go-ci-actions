@@ -11,7 +11,9 @@ permissions:
   id-token: write
 concurrency:
   group: artifacts-${{ github.ref }}
-  cancel-in-progress: true
+  # A newer push to a pull request replaces its run; trunk runs all finish, so
+  # each main commit gets its own result and the next push a green base.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 env:
   CI_ARTIFACT_ENDPOINT: ${{ secrets.CI_ARTIFACT_ENDPOINT }}
 jobs:

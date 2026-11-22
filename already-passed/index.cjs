@@ -22,6 +22,7 @@ async function main() {
     console.log('::notice::' + result.reason + '; the jobs run');
   }
   output('passed', String(result.passed));
+  output('passed-jobs', JSON.stringify(result.passedJobs || []));
   output('reason', result.reason);
   console.log((result.passed ? 'already passed: ' : 'not passed yet: ') + result.reason);
 }

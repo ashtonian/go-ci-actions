@@ -3,6 +3,38 @@
 Releases are signed tags on merge commits of `main`. Pin the full commit SHA
 with the tag as a comment (`@<sha> # vX.Y.Z`).
 
+## v1.13.0
+
+- **acceptance (breaking):** verify no longer trusts the receipt's contents.
+  Any job of a pull request run with `id-token: write` can write the run's
+  receipt, so through v1.12.0 code under review could forge the passed jobs
+  and selections and have the merge push skip a job that failed. Receipts are
+  version 2 and name only the commit the run checked out. verify reads that
+  commit from GitHub (`git/commits`) and accepts it only as GitHub's merge of
+  the head into this push's parent, with the push's tree, committed no later
+  than the run was created (a dispatched run: the head itself, with the
+  push's tree, in a workflow whose `workflow_dispatch` declares no inputs).
+  Which jobs passed comes from the run's jobs (`actions/runs/<id>/jobs`,
+  latest attempt), mapped to job IDs through the workflow's job names,
+  matrix suffixes and reusable-workflow calls; a name two jobs could show is
+  evidence for neither. What the pull request checked comes from the new
+  `parent-selections` input, which the push's scope computes. Without it, a
+  job is reused only when `base` is the merge's parent. record's
+  `selections` input is gone; receipts from older record steps are not
+  reused. The verify token needs `contents: read`.
+- **acceptance:** `max-age-hours` defaults to 168, the receipts' seven-day
+  retention, and refuses more; validation does not go stale while its tree
+  is unchanged, and the green-base rule still bounds what changed around it.
+- **scope:** on a push of a merge commit, the new `parent-selections` and
+  `parent-files` outputs measure the change from the merge's first parent, as
+  the pull request's run measured it, over the same checkout and Go package
+  graph (loaded once for both measurements).
+- **already-passed:** decides each named job on its own. A run that ran some
+  of the names no longer vouches for the rest; the new `passed-jobs` output
+  lists the names that passed, so one call can gate several jobs.
+- **CI:** this repository's workflows cancel superseded pull request runs
+  only; every main push run finishes.
+
 ## v1.12.0
 
 - **runner-labels (new):** fails a workflow that names a self-hosted runner
