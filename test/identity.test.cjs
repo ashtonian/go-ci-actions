@@ -97,7 +97,8 @@ test('packaged identity hands the build cache to the runner plugin', async t => 
   assert.equal(run.outputs.build, path.join(run.temp, 'gocacheprog'));
   assert.match(run.outputs.key, new RegExp('^go-v1-mod-Linux-X64-[0-9a-f]{16}-' + APP + '$'));
   assert.equal(run.outputs['module-proxy'], '');
-  assert.deepEqual(run.exported, {GOCACHEPROG: path.join(run.bin, 'gocacheprog'), GOCACHEPROG_DIR: run.outputs.build});
+  assert.deepEqual(run.exported, {GOCACHEPROG: path.join(run.bin, 'gocacheprog'), GOCACHEPROG_DIR: run.outputs.build,
+    GOLANGCI_LINT_CACHEPROG: path.join(run.bin, 'gocacheprog')});
   assert.match(run.stdout, /build cache: remote; modules: archive/);
 });
 

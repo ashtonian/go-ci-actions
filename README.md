@@ -15,19 +15,22 @@ Optional inputs: go-version (empty), go-version-file (go.mod), check-latest
 (false), workload (empty), cache-dependency-path (empty: the manifests under
 go-version-file's directory, see Policy), cache-mode (read-write),
 cache-key-prefix (go-v1), seed-from-other-workloads (true),
-max-staleness-hours (2), build-cache-backend (auto) and module-proxy (auto).
+max-staleness-hours (2), build-cache-backend (auto), module-proxy (auto) and
+test-input-mtimes (content, see Test results across checkouts).
 
 Set cache-mode to read-only to restore without pruning or saving; off installs
-Go without restoring or saving caches. Include matrix variants, build flags and
-external C library versions in workload. Go does not detect changes to cgo system
-libraries. Keep forced execution for integration, benchmark and other
+Go without restoring or saving caches, and leaves the checkout's file times
+alone. Include matrix variants, build flags and external C library versions in
+workload. Go does not detect changes to cgo system libraries. Keep forced
+execution (`-count=1`) for integration, benchmark and other
 environment-dependent checks in caller workflows.
 
 Outputs: go-version, actual-toolchain, build-cache-backend (github, remote or
 off), module-proxy (the runner proxy in use, or empty), cache-primary-key
 (empty when nothing is archived, which includes cache-mode off),
-cache-matched-key, cache-hit. A prefix restore provides reuse even when
-cache-hit is false.
+cache-matched-key, cache-hit, test-input-mtimes (content when the checkout's
+tracked files carry content-derived times, off otherwise). A prefix restore
+provides reuse even when cache-hit is false.
 
 ## Policy
 
@@ -70,6 +73,15 @@ module cache. Without both signals, or with build-cache-backend github, build
 objects stay in the GitHub cache. A GOCACHEPROG inherited from the runner is
 cleared then, and in off mode, so each mode means what it says.
 
+Linters keep their caches there too. With the remote backend the action also
+exports GOLANGCI_LINT_CACHEPROG as the same plugin (unless the job sets it), so
+golangci-lint v2.13 and later stores its analysis cache through the plugin;
+staticcheck 2026.2 and later reads GOCACHEPROG itself. Both then hit across
+runners on the same terms as build objects: their keys cover sources,
+dependencies, the linter version and configuration (golangci-lint also salts
+with `--build-tags` and the module's `go.mod`), and the entries another ref can
+read come only from runs on a trusted ref (see *Who fills the shared cache*).
+
 Job containers can consume the same runner-owned setup through the mounted
 tool cache. Before accepting a job, the runner places a native executable at
 `$RUNNER_TOOL_CACHE/go-ci-cache/v1/gocacheprog` and writes `config.json` beside
@@ -104,6 +116,106 @@ fall back to the same workload's older manifests, then (with
 seed-from-other-workloads) to any workload's archive. The local plugin
 directory is per job and is not trimmed, measured or archived;
 max-staleness-hours applies to the GitHub backend only.
+
+## Test results across checkouts
+
+`go test` replays a passing package's result from the build cache when nothing
+it depends on changed. The key covers the test binary (the package, every
+dependency, build flags, toolchain), the cacheable test flags, the environment
+variables the test read, and every file inside the module it opened or
+stat'ed, recorded by absolute path, size, mode and modification time, not by
+content (`cmd/go/internal/test`, `hashOpen`). A file modified less than two
+seconds before the run disables caching for that package. `actions/checkout`
+writes every file at checkout time, so with checkout times no package whose
+tests read `testdata` ever matches a result recorded in another job, even
+though its compiled objects hit the shared cache.
+
+With test-input-mtimes `content` (the default), setup gives every tracked file
+and symbolic link in the Git work tree holding go-version-file a modification
+time derived from its bytes, after checkout and before any test runs:
+
+- **Derivation.** SHA-256 over a versioned prefix and the file's bytes (a
+  link's target path for a symbolic link); the first 48 bits become
+  2000-01-01T00:00:00Z plus 29 bits of seconds and 19 bits of binary fraction.
+  Every time falls between 2000 and 2017: years older than the two-second
+  cutoff, and inside 32-bit seconds. The fraction is exact as a double and
+  survives Node's microsecond timestamps, so identical bytes give an identical
+  time in every checkout on every runner, and adjacent fractions stay
+  distinct. Go also keys on size, so a false match needs two different
+  contents of the same size at the same path whose 48 bits collide:
+  probability 2^-48 per pair (2^-29 on a filesystem that stores whole
+  seconds). The runners' ext4/XFS and APFS store nanoseconds.
+- **Directories.** Every directory holding a stamped path (and the work tree
+  root) gets 2000-01-01T00:00:00Z exactly. Go hashes a directory it reads by
+  its own stat plus every entry's name and stat, so a constant directory time
+  still sees an entry added, removed or changed.
+- **What is on disk now.** The time comes from the file's current bytes, not
+  from the index, so a file a step changed before setup gets its new content's
+  time. A file written after setup gets the time of that write, which misses
+  (and inside two seconds is not cached at all): conservative. Copies that
+  preserve times (`cp -p`, `tar`) keep a content-derived time with its
+  content. Nothing may write tracked files while setup runs.
+- **Left alone.** Untracked and ignored files (generated during the job, so
+  tests reading them re-execute), submodule contents (another repository's
+  index), index entries absent from disk (sparse checkouts), sibling
+  checkouts in the workspace other than go-version-file's, and files this user
+  may not re-time. A workspace without Git, or a work tree outside the
+  workspace, is logged as a notice and left unchanged.
+- **Git's index.** The index caches each file's stat, so setup refreshes it
+  (`git update-index -q --refresh`) after stamping; without that, plumbing
+  such as `git diff-index --quiet HEAD` would report every file as changed. A
+  file that differs from the index still shows as modified.
+
+The log line reports the files, links and directories stamped and the time
+taken. The cost is one read of the tracked bytes by setup plus one by Git's
+refresh, which rehashes every re-timed file: in a Linux container on 4 CPUs,
+a 62,950-file, 952 MB checkout (gox, 921 MB of it `bench-results/`) took
+3.0 s, 2.0 s of it the refresh; this repository's checkout takes tens of
+milliseconds. A job that runs no `go test` can set test-input-mtimes `off`.
+
+**What callers keep forced.** Content-derived times make a cached result as
+trustworthy as the files Go can see. A test whose outcome depends on anything
+else must keep `-count=1`: databases, containers, network services, processes
+it starts, the installed `git` or other tools, the wall clock, kernel features
+(io_uring availability, cgroups), hardware, randomness it does not seed, and
+files outside the module. Integration, E2E, benchmark and fuzz lanes keep
+`-count=1`. A flag outside go test's cacheable set (`-benchtime`,
+`-coverprofile`, `-cpu`, `-failfast`, `-fullpath`, `-list`, `-outputdir`,
+`-parallel`, `-run`, `-short`, `-skip`, `-timeout`, `-v`) disables result
+caching for the run: `-count=1` by convention, but also `-bench`, `-shuffle`
+and `-args`. Build flags such as `-race`, `-tags` and `-trimpath` are part of
+the test binary's identity and keep caching.
+
+**Who fills the shared cache.** A run with `-count=1` stores no result, and
+a remote cache that scopes writes by ref (the site's gate: trusted refs write
+the namespace every ref reads, any other ref only its own) keeps a pull
+request's results to that pull request. Results another pull request can
+reuse therefore come only from a cacheable run on a trusted ref. When pushes
+to the default branch skip work a pull request already passed (`acceptance`)
+or a change does not touch (`scope`), that run is the nightly. Make the
+nightly the backstop and the filler at once: run `go clean -testcache` first,
+then the same cacheable command the pull requests run. Every earlier result
+is then expired, so every test executes, and the results it stores are what
+the next day's pull requests replay. Measured on this repository's fixture:
+after `go clean -testcache` the next run executed and the one after replayed
+`(cached)`, while a `-count=1` run on a fresh cache left the next cacheable
+run to execute again. Environment-dependent lanes keep `-count=1` in the
+nightly too.
+`go test -json` replays cached packages with their `run`/`pass` events, so
+inventories built from `-json` keep working.
+
+**The make hazard.** Content-derived times are years in the past. A tool that
+decides freshness by comparing a tracked input's time with an output restored
+from a cache (make, `tsc --build`, Cargo's local-crate fingerprints) sees every
+restored output as newer than its inputs and skips the rebuild even when the
+input changed. Checkout times hide this today because every input looks new.
+Before adopting this release, a caller checks its rules that compare tracked
+inputs with outputs restored from actions/cache or another job, and sets
+test-input-mtimes `off` on those jobs (or removes the restored outputs).
+Outputs a job builds itself are unaffected: they are newer than any stamped
+input. Two tracked files compared with each other (a checked-in generated file
+and its source) have an arbitrary but stable order, as with checkout times,
+whose order follows checkout order.
 
 ## Module proxy
 
@@ -207,6 +319,67 @@ remote driver refuses a BuildKit config file, and later buildx calls read the
 selection from there. Use it once per job. A Dockerfile that cross-compiles in
 `$BUILDPLATFORM` stages should keep a single amd64 builder, because on this
 builder its compile stage would run on the arm64 node.
+
+## BuildKit cache
+
+`ashtonian/go-ci-actions/buildx-cache@FULL_COMMIT_SHA` gives one image build
+its BuildKit `cache-from` and `cache-to` entries: a registry cache in a
+registry the job is already logged in to, or GitHub's cache when it names no
+registry.
+
+```yaml
+- uses: docker/login-action@<sha>
+  with: {registry: "${{ secrets.HARBOR_REGISTRY }}", username: ..., password: ...}
+- id: cache
+  uses: ashtonian/go-ci-actions/buildx-cache@FULL_COMMIT_SHA
+  with:
+    registry: ${{ secrets.HARBOR_REGISTRY }}
+    repository: karsto/buildcache/server
+    platforms: linux/amd64
+- uses: docker/build-push-action@<sha>
+  with:
+    platforms: linux/amd64
+    cache-from: ${{ steps.cache.outputs.cache-from }}
+    cache-to: ${{ steps.cache.outputs.cache-to }}
+```
+
+A registry has no branch scoping of its own, so the tag carries it. The
+default branch (pushes, schedules and dispatches on it) writes and reads
+`<scope>`; a pull request writes `<scope>--pr-<number>` and reads it, then
+`<scope>`; any other branch does the same with `branch-<name>`, a merge group
+with `merge-group`. A pull request therefore never changes the layers a
+default-branch build imports, which is the isolation GitHub's cache gives. The
+export is an OCI image manifest (`image-manifest=true,oci-mediatypes=true`),
+which Harbor stores where it refuses BuildKit's default cache index, with
+`ignore-error=true` so a failed export does not fail the build; a missing or
+unreadable import is a cold build. Without a registry the entries are
+`type=gha,scope=<scope>` (GitHub scopes them by branch itself).
+
+Platforms name the cache too: `platforms: linux/amd64` writes
+`<scope>--linux-amd64`. On a builder with more than one node, such as
+[buildx-native](#native-multi-arch-builder)'s, every node exports its own
+platform's cache to the same reference and the last to finish wins: measured
+on a two-node builder, a cold rebuild reused the amd64 layers and re-ran every
+arm64 step. The action therefore refuses more than one platform on a
+multi-node builder (it reads `docker buildx inspect`); build each platform in
+its own invocation with its own `platforms` and combine the digests
+(`docker buildx imagetools create`). A single-node builder exporting several
+platforms writes them in one manifest and is accepted.
+
+Inputs: `registry` (host, no scheme; empty uses `type=gha`), `repository`
+(required with a registry: a lower-case path, by convention
+`<project>/buildcache/<image>`, so a retention rule can match the cache
+repositories alone), `scope` (default the job ID), `platforms` (comma- or
+newline-separated, default empty), `mode` (`max`, every stage's layers, or
+`min`) and `builder` (default the current one). Outputs: `cache-from` (one
+entry per line, as build-push-action takes it; repeat `--cache-from` per line
+for `docker buildx build`), `cache-to` and `backend` (`registry` or `gha`).
+
+Credentials and reach are the runner's and the repository's, not this
+action's: the job logs in to the registry with a robot that may push to the
+project, and the builder's nodes must reach the registry and its layer
+storage. In the site's runners that is Harbor for the private sets; public
+sets, whose egress excludes the LAN, use GitHub's cache.
 
 ## Change scope
 
@@ -543,7 +716,7 @@ the in-cluster `arc-go-ci-actions` runners. Hosted macOS is opt-in through the
 repository variable `MACOS_CI=on`; it is excluded by default. The contracts cover
 successful cross-job save/restore, matrix isolation, failed-job
 save suppression, restore-only and disabled modes, and the remote backend's
-plugin environment and modules-only archive, a ready module proxy's GOPROXY and
+plugin environment (GOLANGCI_LINT_CACHEPROG included) and modules-only archive, a ready module proxy's GOPROXY and
 build-only archive, and the fallback when the proxy does not answer. A real
 job-container check uses Karsto's pinned Playwright runtime to verify remote
 object reuse from fresh local directories, and that a module proxy the runner
@@ -553,14 +726,25 @@ directory, and the disabled contract that off mode has no key. Policy tests
 cover reruns, invalid inputs, safe pruning, long-running jobs, backend
 selection, manifest scoping and patterns, skipping the digest and the post-step
 walk when nothing is archived, and the npm registry cache's selection,
-precedence and health paths. No npm dependencies. `test/acceptance_test.py`
+precedence and health paths. The test-input-mtimes tests stamp real Git
+checkouts: two checkouts of a commit get identical times, a same-size edit
+changes only the edited file's time, a file changed after checkout is stamped
+from its new content and Git still reports it, the refreshed index reads
+clean, and untracked files, submodules, symbolic link targets, off mode,
+workspaces without Git and work trees outside the workspace are left alone.
+The test-results contract runs `go test` on a fixture that reads `testdata`:
+the result recorded in one checkout replays as `(cached)` in a fresh checkout
+of the same content, misses with checkout times, and re-executes and fails
+after a same-size fixture edit. No npm dependencies. `test/acceptance_test.py`
 (`python3 -m unittest discover -s test -p acceptance_test.py`) checks that a
 receipt is recorded only for a same-repository pull request merge commit with
 no failed or cancelled job, that it lists passed and skipped jobs apart, and
 that verify reuses validation only for a matching receipt that passed every
 required job, against a real Git merge fixture; the smoke job runs it. The
 history tests cover already-passed's decision over earlier runs and the
-packaged action against a stub API. The scope tests cover globs, Go package
+packaged action against a stub API. The buildx-cache tests cover the tag per
+ref and platform, the GitHub-cache fallback, input validation, and the
+packaged action refusing a multi-platform cache on a two-node builder. The scope tests cover globs, Go package
 patterns, configuration errors, each event's base, job selection, and the
 packaged action over real shallow clones (a pull request merge whose base it
 fetches, a push against a stubbed green run, every fallback to a full run, and
