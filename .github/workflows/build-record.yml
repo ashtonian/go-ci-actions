@@ -14,7 +14,9 @@ env:
   DOCKER_BUILD_RECORD_UPLOAD: "false"
 concurrency:
   group: docker-record-${{ github.ref }}
-  cancel-in-progress: true
+  # A newer push to a pull request replaces its run; trunk runs all finish, so
+  # each main commit gets its own result and the next push a green base.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 jobs:
   record:
     if: github.actor_id == '4212452' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)

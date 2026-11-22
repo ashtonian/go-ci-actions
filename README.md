@@ -521,6 +521,7 @@ jobs:
           required: ${{ steps.scope.outputs.jobs }}
           base: ${{ steps.scope.outputs.base }}
           selections: ${{ steps.scope.outputs.selections }}
+          parent-selections: ${{ steps.scope.outputs.parent-selections }}
           variables: ${{ toJSON(vars) }}
   test:
     needs: scope
@@ -554,8 +555,11 @@ array of the selected job IDs, in `jobs` order), `wide-jobs` (the selected
 jobs that check every package), `selections` (JSON object of each selected
 job to what it checks: the affected Go packages its patterns match, as import
 paths, or `"all"` for a job that checks everything or has no Go patterns;
-pass it to acceptance record and verify), `base`, `files` (a file
-listing the changed paths, one per line; empty for a full run), `reason`,
+pass it to acceptance verify), `parent-selections` and `parent-files` (on a
+push of a merge commit, the same measured from the merge's first parent, as
+the pull request's run measured them; empty otherwise or when that
+measurement fails), `base`, `files` (a file listing the changed paths, one
+per line; empty for a full run), `reason`,
 `go-packages` (JSON object of module directory, relative to `go-directory`, to
 the package directories to check relative to the module, `"./..."` for all;
 modules with nothing affected are absent), `go-args` (the affected packages'
@@ -595,80 +599,122 @@ same workflow file over it again repeats work whose result is known.
 
 - **record** runs in the pull request, in a job that needs every validation
   job. It refuses unless the event is a pull request from this repository and
-  the checkout is that pull request's merge commit (second parent the head),
-  or the event is a `workflow_dispatch` on a branch and the checkout is that
-  branch's head, and no job in `results` failed or was cancelled. A dispatched
-  run is how a pull request whose own run cannot start (a bot's, under an
-  owner-only actor policy) gets validated; its receipt serves the merge when
-  the merge has the head's tree, as it does when the branch contains the
-  default branch. record stores the `selections` it is given, for a dispatch
-  exactly as for a pull request, and never derives one from the event. The
-  scope selects every job on a dispatch and says `"all"`, but a dispatch whose
-  inputs narrow its jobs (an `if:` on an input, a reduced matrix, a
-  fast-runner mode) ran less: pass record the reduced selection of each such
-  job, or skip record on those dispatches. A dispatched receipt is reused
-  only by a verify given `selections`, and one that recorded none covers
-  nothing. It stores a receipt,
-  `acceptance.json`, as the run's `acceptance` artifact in SeaweedFS
-  (seven-day retention): the repository, workflow file, run ID and attempt,
-  the event, the validated commit's SHA, parents and tree, a SHA-256 of the repository
-  variables, the jobs that passed and the jobs that were skipped (by the
-  run's scope or any other condition) as separate lists, and `selections`,
-  what each job checked (the scope's output).
-- **verify** runs first in the push. It outputs `reused=true` only when the
-  push is the first attempt of a push to the default branch, the pushed commit
-  is a merge whose first parent is the previous head (`before`), `base` (the
-  scope's base) has a successful run of the same workflow file on the
-  default branch (`green_base`), the latest validation run (pull_request or
-  workflow_dispatch) of that workflow for the merge's second parent completed
-  successfully within
-  `max-age-hours` (6), that run's final attempt stored a
-  receipt with the same tree, head, workflow file, variables digest, run ID
-  and attempt, and every job in `required` passed in it having checked at
-  least what the push's scope selects for it. `required` and `selections`
-  are the push's own scope (the scope action's `jobs` and `selections`
-  outputs). Reuse is per job: `remaining` lists the required jobs the push
-  still runs, those the matching receipt does not show passed (a job the pull
-  request skipped, such as a heavy suite it runs only with `full-ci`) or
-  passed on a narrower selection, so the rest are skipped even when some must
-  run; `reused` is true when none remain. Without a matching receipt
-  on a green base `remaining` is every required job. With `required` empty,
-  every job the receipt names must have passed and `remaining` is empty.
-  Anything else, an API or storage error included, gives `reused=false` with
-  the reason in `reason`, the log and the job summary, and the push's jobs
-  run. Only invalid inputs fail the step.
+  the checkout is the event's merge commit (`GITHUB_SHA`, second parent the
+  head), or the event is a `workflow_dispatch` on a branch and the checkout is
+  that branch's head, and no job in `results` failed or was cancelled. A
+  dispatched run is how a pull request whose own run cannot start (a bot's,
+  under an owner-only actor policy) gets validated; its receipt serves the
+  merge when the merge has the head's tree, as it does when the branch
+  contains the default branch. It stores a receipt, `acceptance.json`, as the
+  run's `acceptance` artifact in SeaweedFS (seven-day retention): the
+  repository, workflow file, run ID and attempt, the event, the commit the run
+  checked out, and a SHA-256 of the repository variables. Nothing else: which
+  jobs passed and what each checked are read from GitHub and the push's own
+  scope.
+- **verify** runs first in the push. It reuses a required job only when all
+  of these hold:
+  1. the push is the first attempt of a push to the default branch, and the
+     pushed commit is a merge whose first parent is the previous head
+     (`before`);
+  2. `base` (the scope's base) has a successful run of the same workflow file
+     on the default branch (`green_base`);
+  3. the latest validation run (pull_request or workflow_dispatch, from this
+     repository) of that workflow for the merge's second parent completed
+     successfully and was last updated within `max-age-hours` (168, the
+     receipts' retention);
+  4. that run's final attempt stored a receipt for the same repository,
+     workflow file, event, run ID, attempt and variables digest;
+  5. GitHub's copy of the commit the receipt names is this merge as the run
+     checked it: for a pull request run, a commit whose parents are exactly
+     `before` and the head, with the push's tree, committed no later than the
+     run was created; for a dispatched run, the head itself, with the push's
+     tree, in a workflow whose `workflow_dispatch` declares no inputs;
+  6. the run's jobs, as GitHub's jobs API shows their latest attempt, include
+     the job, every one shown for it succeeded or was skipped and at least one
+     succeeded;
+  7. the pull request checked at least what the push needs: its
+     `parent-selections` entry covers its `selections` entry. Without
+     `parent-selections`, only when `base` is the merge's parent, so both
+     were measured from the same commit. A dispatched run selected every job
+     in full and covers anything.
 
-Why this is sound. The push runs only `required` because every other job's
-inputs are unchanged since `base`, the last green run of the workflow, so
-`base` must be green. A required job the pull request passed on this tree is
-reused only if the pull request checked at least what the push needs: a job
-narrowed to the affected packages (or apps, or checks) checks a set measured
-from the pull request's base, while the push's set is measured from `base`,
-and when a red commit sits between them the push's set is larger. Push X
-breaks package `state` and its run fails, so `base` stays before X; a pull
-request on X touches only `media` and its `go` job tests `media`; the push
-needs `state` and `media`, the receipt shows only `media`, and `go` runs. A
-job's selection covers another when it is `"all"` or a superset; a job the
-receipt has no selection for is not reused. With `base` the parent, both
-sets are the same diff and every passed job is reused, as v1.8.0's green
-parent did; with an older `base`, a job is reused only when the extra
-commits touched nothing the pull request did not check.
+  `required` and `selections` are the push's own scope (the scope action's
+  `jobs` and `selections` outputs). Reuse is per job: `remaining` lists the
+  required jobs the push still runs (a job the pull request skipped, such as a
+  heavy suite it runs only with `full-ci`, failed, or checked less), so the
+  rest are skipped even when some must run; `reused` is true when none
+  remain. When conditions 1 to 5 fail, `remaining` is every required job.
+  With `required` empty, every job the run shows must have succeeded, none
+  only skipped, and `remaining` is empty. Anything else, an API or storage
+  error included, gives `reused=false` with the reason in `reason`, the log
+  and the job summary, and the push's jobs run. Only invalid inputs fail the
+  step.
 
-**Compute `required` and `selections` with the scope action and pass its
-`base`.** A job that narrows its work some other way (a step that runs only
-some checks, a render of only the affected apps) puts what it checks in
-`selections` itself, in both the pull request and the push. Without
+**Why the receipt is only a pointer.** The gateway scopes an artifact write to
+the run (repository, run ID, attempt), not to a job: any job of the pull
+request's run with `id-token: write` can write the run's receipt, and a pull
+request's tests run the pull request's code. Up to v1.12.0 verify trusted the
+receipt's lists of passed jobs and selections, so code under review could
+have the merge push skip a job that failed. Now the receipt names one commit
+and everything else comes from GitHub: the commit's parents, tree and date
+(`GET git/commits/<sha>`), the jobs' conclusions (`GET
+actions/runs/<id>/jobs`), and the pull request's selections, recomputed by
+the push's scope over the same tree. A forged receipt can name only a commit
+that passes condition 5, and the jobs it gets credit for are the ones GitHub
+shows passed.
+
+One binding stays indirect: GitHub does not report which merge commit a pull
+request run checked out, so condition 5 ties it by parents, tree and time.
+If the base moved, the run checked the head merged into the older base; a
+forged receipt could name a merge into the newer base only if GitHub created
+that commit before the run was created, a window of seconds between the
+event and the run.
+
+**Why the selections are compared.** The push runs only `required` because
+every other job's inputs are unchanged since `base`, the last green run of the
+workflow, so `base` must be green. A required job the pull request passed on
+this tree is reused only if the pull request checked at least what the push
+needs: a job narrowed to the affected packages (or apps, or checks) checks a
+set measured from the pull request's base, the merge's first parent, while
+the push's set is measured from `base`, and when a red commit sits between
+them the push's set is larger. Push X breaks package `state` and its run
+fails, so `base` stays before X; a pull request on X touches only `media` and
+its `go` job tests `media`; the push needs `state` and `media`, the parent's
+scope selects only `media`, and `go` runs. A selection covers another when it
+is `"all"` or a superset; a job the parent's scope did not select (one a pull
+request runs in a reduced mode, lint only, say) covers only an empty
+selection. With `base` the parent, both sets are the same diff and every
+passed job is reused; with an older `base`, a job is reused only when the
+extra commits touched nothing the pull request did not check.
+
+**Compute `required`, `selections` and `parent-selections` with the scope
+action and pass its `base`.** On a push of a merge, the scope action measures
+the change twice over the same checkout: from `base` (`selections`, `files`)
+and from the merge's first parent, as the pull request's run did
+(`parent-selections`, `parent-files`), loading the Go package graph once. A
+job that narrows its work some other way (a step that runs only some checks,
+a render of only the affected apps) derives `selections` from `files` and
+`parent-selections` from `parent-files` with the same code. Without
 `selections`, verify ignores `base` and requires the merge's parent to have a
-green run, as in v1.8.0. With `base` empty, as when the scope selected every
-job, each selection is `"all"` and there is nothing older to compare.
-Unscoped (no `required`), the pull request ran every job on this tree and
-nothing is checked. A failure with no input change (a flaky test, a new
-vulnerability advisory) is in no scope; the nightly full run catches it.
+green run. With `base` empty, as when the scope selected every job, each
+selection is `"all"` and needs an `"all"` from the parent. A failure with no
+input change (a flaky test, a new vulnerability advisory) is in no scope; the
+nightly full run catches it.
 
-**v1.10.0: do not pass `base`.** It reused a narrowed job against an older
-`base` without comparing selections, so a red commit between `base` and the
-parent could go unchecked. Upgrade to v1.11.0, or leave `base` out on v1.10.0
-(it then checks the parent as v1.8.0 did).
+**Dispatched validation runs every job in full.** The scope action selects
+every job on `workflow_dispatch`; a workflow whose `workflow_dispatch`
+declares inputs is never reused from a dispatch, because an input can narrow
+a dispatched run's jobs (an `if:` on it, a reduced matrix) in ways nothing
+outside the run shows. A caller with its own selector must select every job
+on a dispatch as well.
+
+**Job names.** verify maps the run's jobs to job IDs by the names GitHub
+shows, read from the workflow file in the push's checkout (the same tree):
+a job's `name`, or its ID when unset, with matrix values appended,
+`name (a, b)`, and the jobs a reusable-workflow call runs, `name / job`. A
+`name` holding an expression matches by its literal prefix; one that is only
+an expression could be any job's. A shown name two job IDs could both have
+is evidence for neither, so give each job a distinct literal prefix.
 
 Tree equality covers the workflow file and everything else in the repository.
 Repository variables are compared through their digest; secrets, the runner
@@ -685,7 +731,7 @@ cancelled:
     needs: [scope, test, image, docs]
     # Explicit: with the default success(), a job the scope skipped would
     # skip this one too.
-    if: ${{ github.event_name == 'pull_request' && !cancelled() && needs.scope.result == 'success' && !contains(needs.*.result, 'failure') && !contains(needs.*.result, 'cancelled') }}
+    if: ${{ (github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch') && !cancelled() && needs.scope.result == 'success' && !contains(needs.*.result, 'failure') && !contains(needs.*.result, 'cancelled') }}
     runs-on: <runner>
     permissions: {contents: read, id-token: write}
     env:
@@ -694,49 +740,68 @@ cancelled:
       - uses: actions/checkout@<sha>
         with: {persist-credentials: false}
       - uses: ashtonian/go-ci-actions/acceptance@FULL_COMMIT_SHA
-        with: {mode: record, results: "${{ toJSON(needs) }}", selections: "${{ needs.scope.outputs.selections }}", variables: "${{ toJSON(vars) }}"}
+        with: {mode: record, results: "${{ toJSON(needs) }}", variables: "${{ toJSON(vars) }}"}
 ```
 
-The verify step sits in the scope job (above). A workflow without a scope job
-runs verify in a first job of its own, without `required`, and gates every
-other job on `needs.<job>.outputs.reused != 'true'` with `!cancelled()` so
-they still run when that job is skipped on pull requests.
+The verify step sits in the scope job (above), whose token needs `contents:
+read` and `actions: read`. A workflow without a scope job runs verify in a
+first job of its own, without `required`, and gates every other job on
+`needs.<job>.outputs.reused != 'true'` with `!cancelled()` so they still run
+when that job is skipped on pull requests.
 
 Inputs: `mode` (`record` or `verify`, required), `results` (record:
 `toJSON(needs)`), `path` (`.`, the checkout's directory, as for scope),
-`required` (verify: a JSON array or one job ID per line),
-`base` (verify: the scope's `base` output), `selections` (both modes: the
-scope's `selections` output),
-`variables` (`toJSON(vars)`, default `{}`; pass the same in both modes),
-`workflow` (the workflow file holding the receipts, default the running
-workflow; a workflow called with `workflow_call` sees its caller's file, so it
-names its own, for example `ci.yml`), `name` (`acceptance`), `max-age-hours`
-(`6`), `token` (`github.token`, needs `actions: read` for verify) and
-`endpoint` (default `CI_ARTIFACT_ENDPOINT`). Both modes need the commit checked
-out (a shallow clone is enough), `id-token: write` for the artifact gateway
-and `CI_ARTIFACT_ENDPOINT` (a repository secret). Outputs (verify): `reused`,
-`remaining` (JSON array of the required jobs to run; the scope job's `jobs`
-output is `remaining || scope.jobs`, since verify does not run on pull
-requests), `reason` and `green_base` (`true`, `false`, or empty when unscoped
-or when verify stopped before asking). v1.10.0's `green_parent`, a
-deprecated copy of `green_base`, is gone; read `green_base`. A consumer that
-passes no `selections` keeps v1.8.0's check on the merge's parent; passing
-`base` and `selections` lets path-filtered and called workflows reuse.
+`required` (verify: a JSON array or one job ID per line), `base` (verify: the
+scope's `base` output), `selections` and `parent-selections` (verify: the
+scope's outputs of those names), `variables` (`toJSON(vars)`, default `{}`;
+pass the same in both modes), `workflow` (the workflow file holding the
+receipts, default the running workflow; a workflow called with
+`workflow_call` sees its caller's file, so it names its own, for example
+`ci.yml`), `name` (`acceptance`), `max-age-hours` (`168`, at most the
+receipts' retention), `token` (`github.token`; verify needs `actions: read`
+and `contents: read`) and `endpoint` (default `CI_ARTIFACT_ENDPOINT`). Both
+modes need the commit checked out (a shallow clone is enough), `id-token:
+write` for the artifact gateway and `CI_ARTIFACT_ENDPOINT` (a repository
+secret). Outputs (verify): `reused`, `remaining` (JSON array of the required
+jobs to run; the scope job's `jobs` output is `remaining || scope.jobs`,
+since verify does not run on pull requests), `reason` and `green_base`
+(`true`, `false`, or empty when unscoped or when verify stopped before
+asking).
 
-The receipt proves only what the run's own validation proved. Possession of
-an archive is not trusted on its own: the run lookup, its conclusion and the
-gateway's per-run write scope are what make it evidence. Lookups share a
-100-second deadline, with 10-second API timeouts, a 4 MiB API document limit
-and a 128 KiB receipt limit. When reuse unexpectedly stops, read `reason` in
-the push run's acceptance step: `no pull request or dispatched run validated
-<sha>` means the merge was not a merge commit of a tested head, a `head`
-mismatch on a dispatched receipt means the branch was behind the default
-branch (so the merge's tree differs), `older than the receipt
-lifetime` means the pull request sat longer than `max-age-hours`, `did not pass
-<jobs>` means the push needs jobs the pull request's scope skipped (its base
-differed from the push's), `has no green run` means the scope's base did not pass
-the workflow (re-run its trunk run, or wait for the next push), and an `acceptance
-evidence unavailable` reason names the API or gateway error.
+**Upgrading from v1.12.0.** Receipts are version 2: a v1.13.0 verify does not
+reuse a pull request run recorded by an older record, so the first merge of
+each open pull request after the upgrade runs its scoped checks. Drop
+record's `selections` input, pass verify `parent-selections`, and give the
+verify job `contents: read`. A caller that derives its own selections
+computes `parent-selections` from the scope's `parent-files`.
+
+Lookups share a 100-second deadline, with 10-second API timeouts, a 4 MiB API
+document limit, a 128 KiB receipt limit and at most 1,000 jobs per run. When
+reuse unexpectedly stops, read `reason` in the push run's acceptance step:
+
+- `no pull request or dispatched run validated <sha>`: the merge was not a
+  merge commit of a tested head.
+- `checked the merge of <head> into <sha>, not into this push's parent`: the
+  base moved after the pull request's last run (another pull request merged
+  first), so its run did not check this tree's base. Expected without a
+  strict up-to-date rule; update the branch to re-validate.
+- `created after its run started`: the receipt names a merge GitHub made
+  after the run began, not the one the run checked out.
+- `has another tree than this push`: on a dispatched receipt, the branch was
+  behind the default branch, so the merge's tree differs.
+- `older than max-age-hours`: the pull request sat longer than
+  `max-age-hours`.
+- `the push runs <jobs>`: GitHub shows those jobs did not pass in the run
+  (skipped, failed, absent) or the parent's scope selected less for them
+  than the push needs; `job names the run cannot tell apart` adds that two
+  jobs' shown names collide.
+- `workflow_dispatch takes inputs`: a dispatched run is not reused in this
+  workflow.
+- `has no green run`: the scope's base did not pass the workflow (re-run its
+  trunk run, or wait for the next push).
+- `the receipt does not match this push (<fields>)`: a receipt from another
+  workflow, variables digest or attempt, or an older receipt version.
+- `acceptance evidence unavailable`: names the API or gateway error.
 
 ## Unchanged scheduled runs
 
@@ -747,16 +812,19 @@ still run (model tests with new seeds, say).
 
 It lists up to `lookback` (10) earlier completed runs of the running workflow
 file for the same `event` (default the current one) and `branch` (default the
-current ref), newest first, excluding the running run. The first run on
-another commit ends the search with `passed=false`: the jobs have something new
-to check. A run that skipped every named job is passed over. Otherwise the
-newest run that ran them decides: `passed=true` only when every matching job
-succeeded, so a failure on this commit runs them again the next time. A name
-covers the job of that name, its matrix variants, `name (variant)`, and, for a
-job that calls a reusable workflow, every job it calls, `name / job`. An API
-error gives `passed=false` with a notice: missing evidence never skips work.
-After `lookback` runs that all skipped the jobs, they run again, which bounds
-how long an unchanged commit goes without them.
+current ref), newest first, excluding the running run, and decides each
+named job on its own. The first run on another commit ends the search: the
+jobs not yet decided have something new to check. A run that skipped a job is
+passed over for it. Otherwise the newest run that ran a job decides it: it
+passed only when every matching job succeeded, so a failure on this commit
+runs it again the next time. A run that ran some of the named jobs vouches for
+those only. `passed=true` when every named job passed so; `passed-jobs` lists
+the ones that did, so one call can gate several jobs. A name covers the job of
+that name, its matrix variants, `name (variant)`, and, for a job that calls a
+reusable workflow, every job it calls, `name / job`. An API error gives
+`passed=false` with a notice: missing evidence never skips work. After
+`lookback` runs that all skipped a job, it runs again, which bounds how long
+an unchanged commit goes without it.
 
 ```yaml
 jobs:
@@ -778,8 +846,10 @@ jobs:
 ```
 
 Inputs: `jobs` (required, one per line), `event`, `branch`, `lookback` (1-50)
-and `token` (`github.token`; needs `actions: read`). Outputs: `passed` and
-`reason`, which the log repeats. It makes at most `lookback + 1` API calls,
+and `token` (`github.token`; needs `actions: read`). Outputs: `passed`,
+`passed-jobs` (JSON array of the named jobs that passed) and `reason` (each
+job's decision), which the log repeats. A job that gates on one of several
+names reads `contains(fromJSON(needs.history.outputs.passed-jobs), 'soak')`. It makes at most `lookback + 1` API calls,
 each with a 10-second timeout.
 
 ## Runner labels
@@ -887,9 +957,15 @@ of the same content, misses with checkout times, and re-executes and fails
 after a same-size fixture edit. No npm dependencies. `test/acceptance_test.py`
 (`python3 -m unittest discover -s test -p acceptance_test.py`) checks that a
 receipt is recorded only for a same-repository pull request merge commit with
-no failed or cancelled job, that it lists passed and skipped jobs apart, and
-that verify reuses validation only for a matching receipt that passed every
-required job, against a real Git merge fixture; the smoke job runs it.
+no failed or cancelled job and names nothing but that commit, and that verify
+reuses a job only when GitHub's copy of that commit is this merge as the run
+checked it, GitHub's jobs API shows the job passed (display names, matrices
+and called workflows mapped; colliding names refused) and the parent's
+selection covers the push's, against a real Git merge fixture and a stub
+API; forged receipt fields change nothing. A scenario runs the real scope
+action for the pull request and the push and checks that the push's
+`parent-selections` equal the pull request's `selections`. The smoke job runs
+it.
 `test/runner_labels_test.py` covers every place a workflow names a runner, the
 scoped and per-scope label files, and that a missing, failing or malformed
 service passes with a warning while a definitive list fails; the smoke job

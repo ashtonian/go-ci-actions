@@ -241,11 +241,11 @@ function write(root, files) {
     fs.writeFileSync(path.join(root, name), content);
   }
 }
-// origin holds main (base, then a second commit) and a feature branch; the
-// checkout is a depth-1 clone of the pull request's merge, as actions/checkout
-// leaves it, so the action must fetch the base itself.
+// origin holds main (base, optionally a later commit, then the merge) and a
+// feature branch off base; the checkout is a depth-1 clone of the merge, as
+// actions/checkout leaves it, so the action must fetch the base itself.
 function repository(t, files = {'README.md': 'base\n', 'docs/guide.md': 'guide\n', 'Dockerfile': 'FROM scratch\n'},
-  change = {'docs/guide.md': 'changed\n'}) {
+  change = {'docs/guide.md': 'changed\n'}, mainChange = null) {
   const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'go-ci-scope-')));
   t.after(() => fs.rmSync(root, {recursive: true, force: true}));
   const origin = path.join(root, 'origin');
@@ -262,11 +262,17 @@ function repository(t, files = {'README.md': 'base\n', 'docs/guide.md': 'guide\n
   git(origin, 'commit', '-q', '-m', 'change');
   const head = git(origin, 'rev-parse', 'HEAD');
   git(origin, 'checkout', '-q', 'main');
+  if (mainChange) {
+    write(origin, mainChange);
+    git(origin, 'add', '.');
+    git(origin, 'commit', '-q', '-m', 'main moved');
+  }
+  const parent = git(origin, 'rev-parse', 'HEAD');
   git(origin, 'merge', '-q', '--no-ff', '-m', 'merge', 'feature');
   const merge = git(origin, 'rev-parse', 'HEAD');
   const workspace = path.join(root, 'workspace');
   git(root, 'clone', '-q', '--depth=1', 'file://' + origin, workspace);
-  return {root, workspace, base, head, merge};
+  return {root, workspace, base, parent, head, merge};
 }
 async function runScope(t, repo, {event, payload, inputs = {}, routes = {}}) {
   const requests = [];
@@ -316,6 +322,34 @@ test('packaged action scopes a push against the last green run', async t => {
   assert.deepEqual(requests[0].query, {branch: 'main', status: 'success', exclude_pull_requests: 'true', per_page: '20'});
   assert.equal(outputs.base, repo.base);
   assert.deepEqual(JSON.parse(outputs.jobs), ['docs']);
+});
+
+test('packaged action measures a push merge from its first parent too', async t => {
+  // main moved (Dockerfile) after the feature branched; the last green run is
+  // on base, before that, so the push needs image and docs while the pull
+  // request, measured from the merge's first parent, selected docs only.
+  const repo = repository(t, undefined, undefined, {'Dockerfile': 'FROM scratch\nUSER 1000\n'});
+  const green = {'/repos/o/r/actions/workflows/ci.yml/runs': {workflow_runs: [
+    {id: 8, conclusion: 'success', head_branch: 'main', event: 'push', head_sha: repo.base,
+      head_repository: {full_name: 'o/r'}, html_url: 'https://github.com/o/r/actions/runs/8'}]}};
+  const {outputs} = await runScope(t, repo, {event: 'push', payload: {}, routes: green});
+  assert.equal(outputs.base, repo.base);
+  assert.deepEqual(JSON.parse(outputs.selections), {docs: 'all', image: 'all'});
+  assert.deepEqual(JSON.parse(outputs['parent-selections']), {docs: 'all'});
+  assert.equal(fs.readFileSync(outputs['parent-files'], 'utf8'), 'docs/guide.md\n');
+  // A full push (no run history) still measures the parent.
+  const full = await runScope(t, repo, {event: 'push', payload: {}});
+  assert.equal(full.outputs.full, 'true');
+  assert.deepEqual(JSON.parse(full.outputs['parent-selections']), {docs: 'all'});
+  // Measured from the parent itself, the two are the same.
+  const parent = await runScope(t, repo, {event: 'push', payload: {}, routes: {'/repos/o/r/actions/workflows/ci.yml/runs': {
+    workflow_runs: [{...green['/repos/o/r/actions/workflows/ci.yml/runs'].workflow_runs[0], head_sha: repo.parent}]}}});
+  assert.equal(parent.outputs['parent-selections'], parent.outputs.selections);
+  assert.equal(parent.outputs['parent-files'], parent.outputs.files);
+  // A pull request has no parent selections.
+  const pull = await runScope(t, repo, {event: 'pull_request',
+    payload: {pull_request: {head: {sha: repo.head}, base: {sha: repo.parent}, labels: []}}});
+  assert.deepEqual([pull.outputs['parent-selections'], pull.outputs['parent-files']], ['', '']);
 });
 
 test('packaged action runs everything when it cannot decide', async t => {

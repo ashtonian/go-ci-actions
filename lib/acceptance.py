@@ -2,12 +2,14 @@
 """Reuse a pull request's passing validation for the push that merges the same tree.
 
 record runs in a pull request run once its validation jobs pass, and stores a
-receipt naming the tested merge commit's tree and which jobs passed. Jobs the
-run's scope left out are recorded as skipped, not passed. verify runs first in
-the push that merges the pull request: when the pushed merge commit carries the
-same tree, the same workflow file and the same repository variables, and every
-job the push requires passed in the pull request, those checks need not run
-again.
+receipt naming the commit the run checked out: GitHub's merge commit of the
+head into the base. verify runs first in the push that merges the pull
+request. It trusts the receipt for nothing but that commit's SHA: any job of
+the run could have written it, so verify reads the commit itself, which jobs
+passed and what each selected from GitHub and the push's own scope. When the
+pull request checked this very merge (same parents, same tree) and a job the
+push requires passed there having checked at least what the push needs, that
+job need not run again.
 """
 
 import datetime
@@ -28,14 +30,17 @@ import urllib.request
 import zipfile
 
 import artifact
+import workflow_outline
 
-RECEIPT_VERSION = 1
+RECEIPT_VERSION = 2
 RECEIPT_FILE = "acceptance.json"
 MAX_RECEIPT = 128 * 1024
 MAX_API_DOCUMENT = 4 * 1024 * 1024
 API_TIMEOUT = 10
 LOOKUP_DEADLINE = 100
 RECEIPT_RETENTION_DAYS = 7
+MAX_JOB_PAGES = 10
+SHA = re.compile(r"[0-9a-f]{40}")
 WORKFLOW_PATH = re.compile(r"\.github/workflows/[A-Za-z0-9._-]+\.ya?ml")
 JOB_ID = re.compile(r"[A-Za-z_][A-Za-z0-9_-]*")
 # Events whose successful runs on the default branch prove a commit green: a
@@ -125,12 +130,12 @@ def build_receipt(env):
     failed = sorted(name for name, result in outcome.items() if result not in ("success", "skipped"))
     if failed:
         raise ValueError("validation did not pass: " + ", ".join(failed))
+    # Which jobs passed and what each checked are not stored: any job of the
+    # run can write this artifact, so verify reads them from GitHub and the
+    # push's own scope instead.
     return {"version": RECEIPT_VERSION, "repository": repository, "workflow": workflow_path(env), "event": event_name,
             "run_id": int(env["GITHUB_RUN_ID"]), "run_attempt": int(env["GITHUB_RUN_ATTEMPT"]),
-            "source": source, "variables": variables_digest(),
-            "passed": sorted(name for name, result in outcome.items() if result == "success"),
-            "skipped": sorted(name for name, result in outcome.items() if result == "skipped"),
-            "selections": job_selections()}
+            "source": source, "variables": variables_digest()}
 
 
 def required_jobs():
@@ -148,29 +153,41 @@ def required_jobs():
     return sorted(set(names))
 
 
-def job_selections():
-    """What each job checks, from the scope's selections output, or None.
+def job_selections(name):
+    """What each job checks, from a selections input (the scope's output of that name), or None.
 
     A JSON object of job ID to "all" or a list of items (import paths, or
     whatever unit a job narrows its work to).
     """
-    raw = artifact.input_value("selections").strip()
+    raw = artifact.input_value(name).strip()
     if not raw:
         return None
     selections = json.loads(raw)
     if not isinstance(selections, dict) or not all(
             JOB_ID.fullmatch(job) and (value == "all" or isinstance(value, list) and all(isinstance(item, str) for item in value))
             for job, value in selections.items()):
-        raise ValueError('selections must map job IDs to "all" or a list of strings: the scope action\'s selections output')
+        raise ValueError(f'{name} must map job IDs to "all" or a list of strings: the scope action\'s {name} output')
     return {job: value if value == "all" else sorted(set(value)) for job, value in selections.items()}
+
+
+def max_age_hours():
+    raw = artifact.input_value("max-age-hours") or str(RECEIPT_RETENTION_DAYS * 24)
+    try:
+        hours = float(raw)
+    except ValueError:
+        hours = 0
+    if not 0 < hours <= RECEIPT_RETENTION_DAYS * 24:
+        raise ValueError(f"max-age-hours must be a number of hours above 0 and at most {RECEIPT_RETENTION_DAYS * 24}, "
+                         "the receipts' retention")
+    return hours
 
 
 def covers(recorded, needed):
     """Whether a pull request's selection for a job checked all a push's selection needs.
 
-    No recorded entry is no evidence: the job may have run in a reduced mode
-    the scope did not select (lint only, say), so it covers only an empty
-    selection.
+    No selection is no evidence: the pull request's scope did not select the
+    job, which may then have run in a reduced mode (lint only, say), so it
+    covers only an empty selection.
     """
     if recorded == "all":
         return True
@@ -191,8 +208,8 @@ def record(env, store=None):
         artifact.setup()
         store = artifact.Store()
     artifact.upload(store, name, str(path), RECEIPT_RETENTION_DAYS, missing="error")
-    skipped = f"; skipped: {', '.join(receipt['skipped'])}" if receipt["skipped"] else ""
-    print(f"recorded {name} for tree {receipt['source']['tree']} (passed: {', '.join(receipt['passed']) or 'none'}{skipped})")
+    print(f"recorded {name}: run {receipt['run_id']} attempt {receipt['run_attempt']} checked {receipt['source']['sha']} "
+          f"(tree {receipt['source']['tree']})")
 
 
 class NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -219,8 +236,13 @@ class GitHub:
             url += "?" + urllib.parse.urlencode(query)
         headers = {"Accept": "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28",
                    "Authorization": "Bearer " + self.token}
-        with self.opener.open(urllib.request.Request(url, headers=headers), timeout=min(API_TIMEOUT, remaining)) as response:
-            data = response.read(MAX_API_DOCUMENT + 1)
+        try:
+            with self.opener.open(urllib.request.Request(url, headers=headers), timeout=min(API_TIMEOUT, remaining)) as response:
+                data = response.read(MAX_API_DOCUMENT + 1)
+        except urllib.error.HTTPError as error:
+            # The error holds the response body open.
+            error.close()
+            raise
         if len(data) > MAX_API_DOCUMENT:
             raise ValueError("oversized API response")
         return json.loads(data)
@@ -243,8 +265,8 @@ def fetch_receipt(run, name, store=None):
             return json.loads(bundle.read(RECEIPT_FILE))
 
 
-def updated_at(run):
-    return datetime.datetime.fromisoformat(run["updated_at"].replace("Z", "+00:00")).timestamp()
+def timestamp(value):
+    return datetime.datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
 
 
 class Verdict(typing.NamedTuple):
@@ -255,6 +277,10 @@ class Verdict(typing.NamedTuple):
     green_base: typing.Optional[bool] = None
     # The required jobs the push still runs; None is all of them.
     remaining: typing.Optional[list] = None
+
+
+class NoReuse(Exception):
+    """The evidence does not serve this push; the message says why."""
 
 
 def green_runs(api, workflow, sha, branch, repository, run_id):
@@ -269,17 +295,89 @@ def green_runs(api, workflow, sha, branch, repository, run_id):
 def scope_base():
     """The commit the push's required jobs were measured from (the scope's base), or None."""
     raw = artifact.input_value("base").strip()
-    if raw and not re.fullmatch(r"[0-9a-f]{40}", raw):
+    if raw and not SHA.fullmatch(raw):
         raise ValueError("base must be a full commit SHA: the scope action's base output")
     return raw or None
 
 
+def check_receipt(receipt, run, repository, workflow):
+    """Raise NoReuse when the receipt is not this run's, for this workflow and these variables."""
+    expected = {"version": RECEIPT_VERSION, "repository": repository, "workflow": workflow, "event": run["event"],
+                "run_id": run["id"], "run_attempt": run["run_attempt"], "variables": variables_digest()}
+    differs = sorted(key for key, value in expected.items() if receipt.get(key) != value)
+    if differs:
+        raise NoReuse("the receipt does not match this push (" + ", ".join(differs) + ")")
+
+
+def validated_commit(api, receipt, run, before, head, tree):
+    """Check, against GitHub's copy, that the commit the receipt names is this push's merge as the run checked it.
+
+    The receipt is only a pointer: the commit's parents and tree come from
+    the API. A pull request run checks GitHub's merge of the head into the
+    base, created before the run, so the commit must merge head into this
+    push's parent and predate the run; a dispatched run checks the branch
+    head itself. Either way its tree must be the push's.
+    """
+    sha = (receipt.get("source") or {}).get("sha")
+    if not isinstance(sha, str) or not SHA.fullmatch(sha):
+        raise NoReuse("the receipt names no commit")
+    if run["event"] == "workflow_dispatch" and sha != head:
+        raise NoReuse(f"the dispatched run checked {sha}, not the merge's head {head}")
+    data = api.get(f"git/commits/{sha}")
+    if data.get("sha") != sha:
+        raise NoReuse(f"GitHub has no commit {sha}")
+    parents = [parent.get("sha") for parent in data.get("parents") or []]
+    if run["event"] == "pull_request":
+        if parents != [before, head]:
+            into = parents[0] if len(parents) == 2 and parents[1] == head else "another commit"
+            raise NoReuse(f"the pull request run checked the merge of {head} into {into}, not into this push's parent {before}")
+        if timestamp(data["committer"]["date"]) > timestamp(run["created_at"]):
+            raise NoReuse(f"the receipt names merge commit {sha}, created after its run started")
+    if (data.get("tree") or {}).get("sha") != tree:
+        raise NoReuse(f"the validated commit {sha} has another tree than this push")
+
+
+def run_jobs(api, run):
+    """The run's jobs, each in its latest attempt."""
+    jobs = []
+    for page in range(1, MAX_JOB_PAGES + 1):
+        data = api.get(f"actions/runs/{run['id']}/jobs", filter="latest", per_page=100, page=page)
+        batch = data.get("jobs") or []
+        jobs += batch
+        if len(batch) < 100 or len(jobs) >= int(data.get("total_count") or 0):
+            return jobs
+    raise ValueError(f"run {run['id']} has more than {MAX_JOB_PAGES * 100} jobs")
+
+
+def job_results(jobs, patterns):
+    """{job ID: passed} for every job ID the run's jobs show, and the IDs whose jobs cannot be told apart.
+
+    Each of the run's jobs is matched to the workflow job whose name shows
+    it. A job ID passed when every job shown for it succeeded or was skipped
+    and at least one succeeded: a job the run skipped, or that called a
+    workflow whose jobs it all skipped, did not pass. A shown name that two
+    job IDs could both show is evidence for neither.
+    """
+    shown, ambiguous = {}, set()
+    for job in jobs:
+        owners = [job_id for job_id, pattern in patterns.items() if pattern.matches(job.get("name", ""))]
+        if len(owners) > 1:
+            ambiguous.update(owners)
+        elif owners:
+            shown.setdefault(owners[0], []).append(job.get("conclusion"))
+    results = {job_id: all(c in ("success", "skipped") for c in conclusions) and "success" in conclusions
+               for job_id, conclusions in shown.items() if job_id not in ambiguous}
+    return results, ambiguous
+
+
 def verify(env, api=None, receipts=fetch_receipt, now=time.time):
-    """A Verdict. Anything short of a matching receipt on a green base runs the push's checks."""
+    """A Verdict. Anything short of GitHub's evidence that the pull request checked this merge runs the push's checks."""
     # An invalid input is a workflow error, not missing evidence: it fails the step.
     required = required_jobs()
     base = scope_base()
-    selections = job_selections()
+    selections = job_selections("selections")
+    parent_selections = job_selections("parent-selections")
+    max_age = max_age_hours() * 3600
     if env.get("GITHUB_EVENT_NAME") != "push":
         return Verdict(False, "only a push reuses pull request validation")
     green_base = None
@@ -294,24 +392,20 @@ def verify(env, api=None, receipts=fetch_receipt, now=time.time):
         if (source["sha"] != env["GITHUB_SHA"] or len(source["parents"]) != 2
                 or source["parents"][0] != payload.get("before")):
             return Verdict(False, "the push is not a single merge commit on the previous head")
-        head = source["parents"][1]
+        before, head = source["parents"]
         repository = env["GITHUB_REPOSITORY"]
         workflow = workflow_path(env)
         api = api or GitHub(env)
         # The push needs only the required jobs because every other job's
-        # inputs are unchanged since base, so base must have passed them: a
-        # required list measured from a red commit could leave out the job
-        # that is failing, and reusing the rest would make this push the
-        # next green base with that failure unchecked.
-        # The push needs only the required jobs because every other job's
-        # inputs are unchanged since base, so base must be green. Measured
-        # from a base older than the parent, a narrowed job's selection can
-        # be wider than what the pull request checked, so an older base is
-        # used only with selections to compare; without them the parent
-        # must be green, as in v1.8.0.
+        # inputs are unchanged since the commit they were measured from, so
+        # that commit must be green: a required list measured from a red
+        # commit could leave out the job that is failing, and reusing the
+        # rest would make this push the next green base with that failure
+        # unchecked. The scope's base is that commit when selections can be
+        # compared; without them it is the merge's parent, as in v1.8.0.
         checked = None
         if required is not None:
-            checked = base if selections is not None else source["parents"][0]
+            checked = base if selections is not None else before
         if checked:
             green_base = bool(green_runs(api, workflow, checked, branch, repository, env.get("GITHUB_RUN_ID", "")))
             if not green_base:
@@ -327,59 +421,54 @@ def verify(env, api=None, receipts=fetch_receipt, now=time.time):
         if not runs:
             return Verdict(False, "no pull request or dispatched run validated " + head, green_base)
         run = max(runs, key=lambda item: (item["updated_at"], item["id"]))
-        max_age = float(artifact.input_value("max-age-hours", "6") or "6") * 3600
+        where = str(run.get("html_url") or f"run {run['id']}")
         if run.get("status") != "completed" or run.get("conclusion") != "success":
-            return Verdict(False, f"the latest validation run did not pass: {run.get('html_url', run['id'])}", green_base)
-        if not 0 <= now() - updated_at(run) <= max_age:
-            return Verdict(False, f"the latest validation run is older than the receipt lifetime: {run.get('html_url', run['id'])}",
-                           green_base)
+            return Verdict(False, f"the latest validation run did not pass: {where}", green_base)
+        if not 0 <= now() - timestamp(run["updated_at"]) <= max_age:
+            return Verdict(False, f"the latest validation run is older than max-age-hours: {where}", green_base)
         receipt = receipts(run, receipt_name())
         if receipt is None:
-            return Verdict(False, f"the validation run stored no receipt: {run.get('html_url', run['id'])}", green_base)
-        expected = {"version": RECEIPT_VERSION, "repository": repository, "workflow": workflow,
-                    "run_id": run["id"], "run_attempt": run["run_attempt"], "variables": variables_digest()}
-        differs = sorted(key for key, value in expected.items() if receipt.get(key) != value)
-        if receipt.get("event", "pull_request") != run["event"]:
-            differs.append("event")
-        recorded = receipt.get("source") or {}
-        if recorded.get("tree") != source["tree"]:
-            differs.append("tree")
-        # A pull request run tested the merge of the head; a dispatched run
-        # tested the head itself, whose tree the merge must then have.
-        validated = (recorded.get("parents") or [])[1:] == [head] if run["event"] == "pull_request" \
-            else recorded.get("sha") == head
-        if not validated:
-            differs.append("head")
-        # A dispatch can narrow its jobs through inputs no scope sees, so its
-        # receipt is evidence only through the selections it recorded.
-        if run["event"] == "workflow_dispatch" and selections is None:
-            return Verdict(False, "a dispatched run's receipt is reused only against selections: every check runs", green_base)
-        if differs:
-            return Verdict(False, "the receipt does not match this push (" + ", ".join(differs) + "): every check runs", green_base)
-        passed, skipped = receipt.get("passed"), receipt.get("skipped")
-        if not isinstance(passed, list) or not isinstance(skipped, list):
-            return Verdict(False, "the receipt does not list its passed and skipped jobs: every check runs", green_base)
-        where = f"{run.get('html_url', run['id'])}" + (f" on green base {checked}" if checked else "")
+            return Verdict(False, f"the validation run stored no receipt: {where}", green_base)
+        check_receipt(receipt, run, repository, workflow)
+        validated_commit(api, receipt, run, before, head, source["tree"])
+        text = Path(workflow).read_text(encoding="utf-8")
+        dispatched = run["event"] == "workflow_dispatch"
+        # A dispatch's scope runs every job in full, unless the dispatch's
+        # inputs narrow its jobs (an if: on an input, a reduced matrix),
+        # which nothing outside the run can see.
+        if dispatched and workflow_outline.dispatch_takes_inputs(text):
+            return Verdict(False, f"{Path(workflow).name}'s workflow_dispatch takes inputs, which may narrow a dispatched "
+                           f"run's jobs: {where} is not reused", green_base)
+        passed, ambiguous = job_results(run_jobs(api, run), workflow_outline.job_name_patterns(text))
+        where += f" on green base {checked}" if checked else ""
         if required is None:
-            # Unscoped, every job the pull request recorded must have run and passed.
-            if skipped:
-                return Verdict(False, f"the pull request run did not pass {', '.join(sorted(set(skipped)))}: "
-                               f"{where}: every check runs", green_base)
+            # Unscoped, every job the run shows must have run and passed.
+            failed = sorted(job for job, ok in passed.items() if not ok) + sorted(ambiguous)
+            if failed or not passed:
+                return Verdict(False, f"the validation run did not pass {', '.join(failed) or 'any job'}: {where}: "
+                               "every check runs", green_base)
             return Verdict(True, f"tree {source['tree']} passed in {where}", green_base)
-        # A job that passed on this tree needs no second run, provided it
-        # checked at least what the push's scope selects for it; the rest run.
-        recorded = receipt.get("selections")
-        if selections is not None:
-            recorded = recorded if isinstance(recorded, dict) else {}
-            remaining = [name for name in required
-                         if name not in passed or not covers(recorded.get(name), selections.get(name, "all"))]
-        else:
-            remaining = [name for name in required if name not in passed]
+
+        def covered(job):
+            if dispatched:
+                return True
+            needed = selections.get(job, "all") if selections is not None else "all"
+            if parent_selections is not None:
+                return covers(parent_selections.get(job), needed)
+            # Measured from the merge's parent, the push's scope is the pull
+            # request's: the same base, tree and configuration.
+            return checked == before
+
+        remaining = [job for job in required if not passed.get(job) or not covered(job)]
         if remaining:
-            reusable = [name for name in required if name in passed]
+            reusable = [job for job in required if job not in remaining]
+            unclear = f" ({', '.join(sorted(ambiguous & set(remaining)))}: job names the run cannot tell apart)" \
+                if ambiguous & set(remaining) else ""
             return Verdict(False, f"tree {source['tree']} passed {', '.join(reusable) or 'none of the required jobs'} in "
-                           f"{where}; the push runs {', '.join(remaining)}", green_base, remaining)
+                           f"{where}; the push runs {', '.join(remaining)}{unclear}", green_base, remaining)
         return Verdict(True, f"tree {source['tree']} passed in {where}", green_base, [])
+    except NoReuse as error:
+        return Verdict(False, f"{error}: every check runs", green_base)
     except (KeyError, TypeError, ValueError, AttributeError, OSError, subprocess.SubprocessError,
             zipfile.BadZipFile, urllib.error.URLError) as error:
         return Verdict(False, f"acceptance evidence unavailable ({type(error).__name__}: {error}): every check runs", green_base)

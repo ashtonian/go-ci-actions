@@ -52,9 +52,11 @@ function go(args, cwd, env = {}) {
   return execFileSync('go', args, {cwd, encoding: 'utf8', timeout: GO_TIMEOUT_MS, maxBuffer: MAX_OUTPUT,
     stdio: ['ignore', 'pipe', 'pipe'], env: {...process.env, ...env}});
 }
-// The affected Go packages for the changed files outside go-ignore, or every
-// package when the change set is unknown (a full run, a shared input).
-function goScope({full, sharedFull, files, workspace: given, directory, builds, ignore, owners, jobs}) {
+// The workspace's Go package graph, loaded once and shared by every change
+// set measured over this checkout: a push measures its own and the one its
+// merge's pull request did over the same tree. A listing that failed fails
+// again for each caller.
+function goGraph({workspace: given, directory, builds}) {
   // go list reports resolved directories.
   const workspace = fs.realpathSync(given);
   const root = path.resolve(workspace, directory);
@@ -63,7 +65,6 @@ function goScope({full, sharedFull, files, workspace: given, directory, builds, 
   }
   const modules = parseStream(go(['list', '-m', '-json'], root));
   if (!modules.length) throw new Error('go list -m found no module in ' + directory);
-  if (full || sharedFull) return {root, modules, result: {full: true, reason: full ? 'a full run' : 'a shared input changed'}};
   const listAll = (args, patterns) => {
     const entries = [];
     for (const build of builds) {
@@ -72,22 +73,42 @@ function goScope({full, sharedFull, files, workspace: given, directory, builds, 
     }
     return entries;
   };
+  const memo = new Map();
+  const once = (key, load) => {
+    if (!memo.has(key)) {
+      try { memo.set(key, {value: load()}); } catch (error) { memo.set(key, {error}); }
+    }
+    const loaded = memo.get(key);
+    if (loaded.error) throw loaded.error;
+    return loaded.value;
+  };
+  return {workspace, root, modules,
+    // One package graph per build configuration, unioned.
+    entries: () => once('packages', () => listAll(['-test', '-json=' + LIST_FIELDS], modules.map(module => module.Path + '/...'))),
+    closure: job => once('binaries ' + job.id, () => binaryClosure(workspace, root, listAll(['-deps', '-json=' + CLOSURE_FIELDS], job.binaries)))};
+}
+// The affected Go packages for the changed files outside go-ignore, or every
+// package when the change set is unknown (a full run, a shared input). A
+// graph that does not load affects every package, with failed set: that is
+// no measurement of what the change reaches.
+function goScope(graph, {full, sharedFull, files, ignore, owners, jobs}) {
+  const {workspace, root, modules} = graph;
+  if (full || sharedFull) return {root, modules, result: {full: true, reason: full ? 'a full run' : 'a shared input changed'}};
   const changed = files.map(file => path.join(workspace, file));
   const considered = files.filter(file => !ignore(file)).map(file => path.join(workspace, file));
   let result = {full: false, reason: 'no Go input changed', packages: []}, binaries = {};
   try {
     if (considered.length) {
-      // One package graph per build configuration, unioned.
-      const entries = listAll(['-test', '-json=' + LIST_FIELDS], modules.map(module => module.Path + '/...'));
       const ownersOf = file => owners(path.relative(workspace, file).split(path.sep).join('/'))
         .map(dir => path.resolve(root, dir));
-      result = affectedPackages({root, modules, entries, changed: considered, exists: fs.existsSync, owners: ownersOf});
+      result = affectedPackages({root, modules, entries: graph.entries(), changed: considered, exists: fs.existsSync,
+        owners: ownersOf});
     }
     // A binary's closure is checked against every changed file, ignored ones
     // too: it may embed a document.
     if (!result.full) {
       for (const job of jobs.filter(candidate => candidate.binaries.length)) {
-        const closure = binaryClosure(workspace, root, listAll(['-deps', '-json=' + CLOSURE_FIELDS], job.binaries));
+        const closure = graph.closure(job);
         const file = changed.find(candidate => closure.files.has(candidate));
         if (file) binaries[job.id] = 'the build of ' + job.binaries.join(', ') + ' reads ' + path.relative(workspace, file);
         else if (closure.broken) binaries[job.id] = 'the build of ' + job.binaries.join(', ') + ' does not load (' + closure.broken + ')';
@@ -97,9 +118,33 @@ function goScope({full, sharedFull, files, workspace: given, directory, builds, 
     // Without the package graph the change cannot be narrowed.
     const detail = (error.stderr || error.message || '').toString().trim().split('\n').slice(-3).join(' ');
     console.log('::warning::go list could not load the packages, so every package is affected: ' + detail);
-    return {root, modules, result: {full: true, reason: 'go list failed'}};
+    return {root, modules, result: {full: true, reason: 'go list failed', failed: true}};
   }
   return {root, modules, result, binaries};
+}
+// What a change set selects: the jobs, their packages and their selections.
+// failed is set when the Go package graph did not load, so the selection is
+// every package by default, not by measurement.
+function measure({config, graph, full, files, ignore, owners}) {
+  const sharedFull = !full && files.some(config.shared);
+  let goResult = null, goPackages = {}, goArgs = '', failed = false;
+  if (graph) {
+    const scoped = goScope(graph, {full, sharedFull, files, ignore, owners, jobs: config.jobs});
+    const dirs = scoped.result.full ? [] : rootDirs(scoped.root, scoped.result);
+    goResult = {full: scoped.result.full, reason: scoped.result.reason, dirs, binaries: scoped.binaries || {},
+      packages: scoped.result.full ? [] : scoped.result.packages.map((pkg, index) => ({importPath: pkg.importPath, dir: dirs[index]}))};
+    goPackages = byModule(scoped.root, scoped.modules, scoped.result);
+    goArgs = importArgs(scoped.modules, scoped.result).join(' ');
+    failed = Boolean(scoped.result.failed);
+  }
+  const selection = selectJobs(config, {full, files, go: goResult});
+  return {goResult, goPackages, goArgs, selection, failed, selections: jobSelections(config, selection, goResult)};
+}
+function writeFiles(env, files) {
+  const dir = fs.mkdtempSync(path.join(env.RUNNER_TEMP || os.tmpdir(), 'go-ci-scope-'));
+  const filesPath = path.join(dir, 'files');
+  fs.writeFileSync(filesPath, files.map(file => file + '\n').join(''));
+  return filesPath;
 }
 function summary(lines) {
   if (process.env.GITHUB_STEP_SUMMARY) fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, lines.join('\n') + '\n');
@@ -153,29 +198,45 @@ async function main() {
       console.log('::warning::' + decision.reason + '; every job runs');
     }
   }
-  const sharedFull = !decision.full && files.some(config.shared);
-  let goResult = null, goPackages = {}, goArgs = '';
-  if (config.jobs.some(job => job.usesGo)) {
-    const scoped = goScope({full: decision.full, sharedFull, files, workspace: repo,
-      directory: input('go-directory') || '.', builds, ignore, owners, jobs: config.jobs});
-    const dirs = scoped.result.full ? [] : rootDirs(scoped.root, scoped.result);
-    goResult = {full: scoped.result.full, reason: scoped.result.reason, dirs, binaries: scoped.binaries || {},
-      packages: scoped.result.full ? [] : scoped.result.packages.map((pkg, index) => ({importPath: pkg.importPath, dir: dirs[index]}))};
-    goPackages = byModule(scoped.root, scoped.modules, scoped.result);
-    goArgs = importArgs(scoped.modules, scoped.result).join(' ');
-  }
-  const selection = selectJobs(config, {full: decision.full, files, go: goResult});
-  let filesPath = '';
-  if (!decision.full) {
-    const dir = fs.mkdtempSync(path.join(env.RUNNER_TEMP || os.tmpdir(), 'go-ci-scope-'));
-    filesPath = path.join(dir, 'files');
-    fs.writeFileSync(filesPath, files.map(file => file + '\n').join(''));
+  const graph = config.jobs.some(job => job.usesGo)
+    ? goGraph({workspace: repo, directory: input('go-directory') || '.', builds}) : null;
+  const measured = measure({config, graph, full: decision.full, files, ignore, owners});
+  const {goResult, goPackages, goArgs, selection} = measured;
+  const filesPath = decision.full ? '' : writeFiles(env, files);
+  // The pull request that this push merges measured its change from the
+  // merge's first parent over this same tree: measure that too, so acceptance
+  // compares the push's selections with ones it computed, not with a record
+  // any job of the pull request's run could have written. Its forced full
+  // run or label made its run wider, never narrower, than this.
+  let parentSelections = '', parentFilesPath = '', parentReason = '';
+  if (env.GITHUB_EVENT_NAME === 'push' && head.parents.length === 2) {
+    const parent = head.parents[0];
+    try {
+      let parentMeasured = measured, parentFiles = files;
+      if (decision.full || decision.base !== parent) {
+        ensureCommit(repo, parent, env, token);
+        parentFiles = changedFiles(repo, parent);
+        parentMeasured = measure({config, graph, full: false, files: parentFiles, ignore, owners});
+      }
+      if (parentMeasured.failed) {
+        parentReason = 'the Go package graph did not load';
+      } else {
+        parentSelections = JSON.stringify(parentMeasured.selections);
+        parentFilesPath = parentFiles === files && filesPath ? filesPath : writeFiles(env, parentFiles);
+      }
+    } catch (error) {
+      parentReason = 'the diff against ' + parent + ' is unavailable (' +
+        (error.stderr || error.message || '').toString().trim().split('\n').pop() + ')';
+    }
+    if (parentReason) console.log('::notice::No selections from the merge\'s parent: ' + parentReason);
   }
   const reason = decision.reason + (selection.shared ? '; the shared input ' + selection.shared + ' changed' : '');
   output('full', String(decision.full || Boolean(selection.shared)));
   output('jobs', JSON.stringify(selection.jobs));
   output('wide-jobs', JSON.stringify(selection.wide));
-  output('selections', JSON.stringify(jobSelections(config, selection, goResult)));
+  output('selections', JSON.stringify(measured.selections));
+  output('parent-selections', parentSelections);
+  output('parent-files', parentFilesPath);
   output('base', decision.full ? '' : decision.base);
   output('files', filesPath);
   output('reason', reason);

@@ -1,19 +1,23 @@
 name: acceptance
 description: >-
-  Record a pull request's passing validation as a receipt for its merge commit's
-  tree, and let the push that merges the same tree skip the checks that passed.
+  Record a pull request's passing validation as a receipt naming the merge
+  commit it checked, and let the push that merges the same tree skip the jobs
+  that passed there, as GitHub reports them.
 inputs:
   mode:
     description: "record, in a pull request or workflow_dispatch job that needs every validation job; verify, first in a push."
     required: true
   results:
-    description: "record: the needs context of the validation jobs, toJSON(needs). Each job succeeded or was skipped; skipped ones are recorded as not passed."
+    description: "record: the needs context of the validation jobs, toJSON(needs). record refuses unless each succeeded or was skipped."
     default: ""
   required:
-    description: "verify: the jobs this push would run, as a JSON array (a scope output) or one per line; reused only when each passed in the pull request. Empty requires every job the receipt names to have passed."
+    description: "verify: the jobs this push would run, as a JSON array (a scope output) or one per line; each is reused only when it passed in the pull request run. Empty requires every job of that run to have passed."
     default: ""
   selections:
-    description: "The scope action's selections output: what each job checks. record stores the pull request's; verify reuses a job only when the push's selection is covered by the pull request's. Without it, verify requires the merge's parent to be green and ignores base."
+    description: "verify: the scope action's selections output, what each job checks for this push. With it, base is the commit the push is measured from; without it, the merge's parent must be green."
+    default: ""
+  parent-selections:
+    description: "verify: the scope action's parent-selections output, what each job checks measured from the merge's first parent, as the pull request's run measured it. A job is reused only when that covers its selections entry. Without it, a job is reused only when base is the merge's parent."
     default: ""
   base:
     description: "verify: the scope action's base output, the commit required and selections were measured from. With selections, reuse needs a green trunk run of the workflow on it; without selections it is ignored and the merge's parent must have one."
@@ -31,23 +35,23 @@ inputs:
     description: "Receipt artifact name."
     default: acceptance
   max-age-hours:
-    description: "verify: a pull request run older than this is not reused."
-    default: "6"
+    description: "verify: a validation run last updated longer ago than this is not reused; at most 168, the receipts' retention."
+    default: "168"
   token:
-    description: "verify: token that can read Actions runs."
+    description: "verify: token that can read Actions runs and jobs (actions: read) and the repository's commits (contents: read)."
     default: ${{ github.token }}
   endpoint:
     description: "SeaweedFS artifact origin; defaults to CI_ARTIFACT_ENDPOINT."
     default: ""
 outputs:
   reused:
-    description: "verify: true when a matching pull request receipt covers this push; false otherwise."
+    description: "verify: true when the pull request's run checked this merge and passed every required job on a selection covering the push's; false otherwise."
     value: ${{ steps.acceptance.outputs.reused }}
   reason:
     description: "verify: why the validation was or was not reused."
     value: ${{ steps.acceptance.outputs.reason }}
   remaining:
-    description: "verify: JSON array of the required jobs the push still runs: those the matching receipt does not show passed, all of them without one, none when reused. Empty without required."
+    description: "verify: JSON array of the required jobs the push still runs: those the pull request's run did not pass on a covering selection, all of them without evidence, none when reused. Empty without required."
     value: ${{ steps.acceptance.outputs.remaining }}
   green_base:
     description: "verify: true when base (or, without it, the merge's parent) has a green run of the workflow on the default branch, false when not (no reuse), empty when unscoped or when verify stopped before asking."
@@ -64,6 +68,7 @@ runs:
         INPUT_REQUIRED: ${{ inputs.required }}
         INPUT_BASE: ${{ inputs.base }}
         INPUT_SELECTIONS: ${{ inputs.selections }}
+        INPUT_PARENT_SELECTIONS: ${{ inputs.parent-selections }}
         INPUT_VARIABLES: ${{ inputs.variables }}
         INPUT_WORKFLOW: ${{ inputs.workflow }}
         INPUT_NAME: ${{ inputs.name }}

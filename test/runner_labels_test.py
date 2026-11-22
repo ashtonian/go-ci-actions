@@ -4,12 +4,14 @@ import io
 import json
 import os
 from pathlib import Path
+import sys
 import tempfile
 import threading
 import unittest
 from unittest.mock import patch
 
 LIB = Path(__file__).parents[1] / "lib"
+sys.path.insert(0, str(LIB))
 spec = importlib.util.spec_from_file_location("runner_labels", LIB / "runner_labels.py")
 runner_labels = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(runner_labels)
