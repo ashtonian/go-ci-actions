@@ -216,22 +216,40 @@ class AcceptanceTests(unittest.TestCase):
         with patch.dict(os.environ, {"INPUT_RESULTS": json.dumps(results)}):
             receipt = self.receipt()
         cases = {
-            "": (False, "image"),
-            '["lint"]': (True, ""),
-            "lint\nscope\n": (True, ""),
-            "[]": (True, ""),
-            '["lint", "image"]': (False, "image"),
-            '["test"]': (False, "test"),
+            "": (False, "image", None),
+            '["lint"]': (True, "", []),
+            "lint\nscope\n": (True, "", []),
+            "[]": (True, "", []),
+            '["lint", "image"]': (False, "runs image", ["image"]),
+            '["test"]': (False, "runs test", ["test"]),
         }
-        for required, (expected, missing) in cases.items():
+        for required, (expected, mentioned, remaining) in cases.items():
             with self.subTest(required=required), patch.dict(os.environ, {"INPUT_REQUIRED": required}):
                 (reused, reason), _ = self.verify(receipt=receipt)
                 self.assertEqual(reused, expected, reason)
-                self.assertIn(missing, reason)
+                self.assertIn(mentioned, reason)
+                self.assertEqual(self.verdict.remaining, remaining)
         legacy = {key: value for key, value in receipt.items() if key not in ("passed", "skipped")}
         with patch.dict(os.environ, {"INPUT_REQUIRED": '["lint"]'}):
             (reused, reason), _ = self.verify(receipt=legacy)
         self.assertFalse(reused, reason)
+
+    def test_verify_outputs_the_jobs_the_push_still_runs(self):
+        cases = [
+            ('["lint", "image"]', acceptance.Verdict(False, "no receipt"), '["image", "lint"]'),
+            ('["lint", "image"]', acceptance.Verdict(False, "partial", True, ["image"]), '["image"]'),
+            ('["lint"]', acceptance.Verdict(True, "reused", True, []), "[]"),
+            ("", acceptance.Verdict(False, "unscoped"), ""),
+        ]
+        for required, verdict, remaining in cases:
+            with self.subTest(verdict.reason):
+                outputs = self.root / ("outputs-" + verdict.reason)
+                with patch.dict(os.environ, {"INPUT_MODE": "verify", "INPUT_REQUIRED": required, "GITHUB_OUTPUT": str(outputs)}), \
+                        patch.object(acceptance, "verify", lambda env: verdict):
+                    acceptance.main()
+                lines = dict(line.split("=", 1) for line in outputs.read_text().splitlines())
+                self.assertEqual(lines["remaining"], remaining)
+                self.assertEqual(lines["reused"], str(verdict.reused).lower())
 
     def test_invalid_required_fails_the_step(self):
         for required in ('{"lint": 1}', '["lint", 2]', '[""]', "[not json"):
@@ -276,8 +294,9 @@ class AcceptanceTests(unittest.TestCase):
             def get(self, path, **query):
                 raise OSError("connection refused")
 
-        reused, reason, green_parent = acceptance.verify(self.push_env(), api=Broken(), receipts=lambda run, name: None,
-                                                         now=lambda: NOW)
+        reused, reason, green_parent, remaining = acceptance.verify(self.push_env(), api=Broken(),
+                                                                    receipts=lambda run, name: None, now=lambda: NOW)
+        self.assertIsNone(remaining, "every required job runs")
         self.assertFalse(reused)
         self.assertIsNone(green_parent)
         self.assertIn("connection refused", reason)

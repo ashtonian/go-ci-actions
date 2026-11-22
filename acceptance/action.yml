@@ -37,6 +37,9 @@ outputs:
   reason:
     description: "verify: why the validation was or was not reused."
     value: ${{ steps.acceptance.outputs.reason }}
+  remaining:
+    description: "verify: JSON array of the required jobs the push still runs: those the matching receipt does not show passed, all of them without one, none when reused. Empty without required."
+    value: ${{ steps.acceptance.outputs.remaining }}
   green_parent:
     description: "verify: true when the commit the merge sits on has a green run of the workflow on the default branch, false when not (no reuse), empty when verify stopped before asking."
     value: ${{ steps.acceptance.outputs.green_parent }}

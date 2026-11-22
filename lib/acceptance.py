@@ -205,6 +205,8 @@ class Verdict(typing.NamedTuple):
     # Whether the commit the merge sits on has a green trunk run of the
     # workflow; None when verify stopped before asking.
     green_parent: typing.Optional[bool] = None
+    # The required jobs the push still runs; None is all of them.
+    remaining: typing.Optional[list] = None
 
 
 def green_runs(api, workflow, sha, branch, repository, run_id):
@@ -275,12 +277,21 @@ def verify(env, api=None, receipts=fetch_receipt, now=time.time):
         passed, skipped = receipt.get("passed"), receipt.get("skipped")
         if not isinstance(passed, list) or not isinstance(skipped, list):
             return Verdict(False, "the receipt does not list its passed and skipped jobs: every check runs", green_parent)
-        # Unscoped, every job the pull request recorded must have run and passed.
-        missing = sorted(set(skipped)) if required is None else [name for name in required if name not in passed]
-        if missing:
-            return Verdict(False, (f"the pull request run did not pass {', '.join(missing)}: "
-                                   f"{run.get('html_url', run['id'])}: every check runs"), green_parent)
-        return Verdict(True, f"tree {source['tree']} passed in {run.get('html_url', run['id'])} on green parent {parent}", True)
+        where = f"{run.get('html_url', run['id'])} on green parent {parent}"
+        if required is None:
+            # Unscoped, every job the pull request recorded must have run and passed.
+            if skipped:
+                return Verdict(False, f"the pull request run did not pass {', '.join(sorted(set(skipped)))}: "
+                               f"{where}: every check runs", green_parent)
+            return Verdict(True, f"tree {source['tree']} passed in {where}", True)
+        # A job that passed on this tree needs no second run, whatever else
+        # the push requires; the rest run.
+        remaining = [name for name in required if name not in passed]
+        if remaining:
+            reusable = [name for name in required if name in passed]
+            return Verdict(False, f"tree {source['tree']} passed {', '.join(reusable) or 'none of the required jobs'} in "
+                           f"{where}; the push runs {', '.join(remaining)}", True, remaining)
+        return Verdict(True, f"tree {source['tree']} passed in {where}", True, [])
     except (KeyError, TypeError, ValueError, AttributeError, OSError, subprocess.SubprocessError,
             zipfile.BadZipFile, urllib.error.URLError) as error:
         return Verdict(False, f"acceptance evidence unavailable ({type(error).__name__}: {error}): every check runs", green_parent)
@@ -293,14 +304,17 @@ def main():
         return
     if mode != "verify":
         raise ValueError("mode must be record or verify")
-    reused, reason, green_parent = verify(os.environ)
-    print(reason)
-    artifact.output("reused", str(reused).lower())
-    artifact.output("reason", reason.replace("\n", " "))
-    artifact.output("green_parent", "" if green_parent is None else str(green_parent).lower())
+    verdict = verify(os.environ)
+    print(verdict.reason)
+    artifact.output("reused", str(verdict.reused).lower())
+    artifact.output("reason", verdict.reason.replace("\n", " "))
+    artifact.output("green_parent", "" if verdict.green_parent is None else str(verdict.green_parent).lower())
+    required = required_jobs()
+    remaining = verdict.remaining if verdict.remaining is not None else required
+    artifact.output("remaining", "" if remaining is None else json.dumps(remaining))
     if summary := os.environ.get("GITHUB_STEP_SUMMARY"):
         with open(summary, "a", encoding="utf-8") as stream:
-            stream.write(f"Acceptance: {'reused' if reused else 'not reused'}, {reason}\n")
+            stream.write(f"Acceptance: {'reused' if verdict.reused else 'not reused'}, {verdict.reason}\n")
 
 
 if __name__ == "__main__":

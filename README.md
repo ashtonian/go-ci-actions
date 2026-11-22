@@ -290,7 +290,7 @@ jobs:
     env:
       CI_ARTIFACT_ENDPOINT: ${{ secrets.CI_ARTIFACT_ENDPOINT }}
     outputs:
-      jobs: ${{ steps.accepted.outputs.reused == 'true' && '[]' || steps.scope.outputs.jobs }}
+      jobs: ${{ steps.accepted.outputs.remaining || steps.scope.outputs.jobs }}
       wide-jobs: ${{ steps.scope.outputs.wide-jobs }}
       go-packages: ${{ steps.scope.outputs.go-packages }}
     steps:
@@ -394,12 +394,16 @@ same workflow file over it again repeats work whose result is known.
   successfully within `max-age-hours` (6), that run's final attempt stored a
   receipt with the same tree, head, workflow file, variables digest, run ID
   and attempt, and every job in `required` passed in it. `required` is the
-  push's own scope (the scope action's `jobs` output): a job the pull request
-  skipped counts only when the push does not need it either. With `required`
-  empty, every job the receipt names must have passed. Anything else, an API
-  or storage error included, gives `reused=false` with the reason in
-  `reason`, the log and the job summary, and every check runs. Only invalid
-  inputs fail the step.
+  push's own scope (the scope action's `jobs` output). Reuse is per job:
+  `remaining` lists the required jobs the push still runs, those the matching
+  receipt does not show passed (a job the pull request skipped, such as a
+  heavy suite it runs only with `full-ci`), so the rest are skipped even when
+  some must run; `reused` is true when none remain. Without a matching receipt
+  on a green parent `remaining` is every required job. With `required` empty,
+  every job the receipt names must have passed and `remaining` is empty.
+  Anything else, an API or storage error included, gives `reused=false` with
+  the reason in `reason`, the log and the job summary, and the push's jobs
+  run. Only invalid inputs fail the step.
 
 The green parent closes a gap scoped runs open. A pull request's receipt
 proves only the jobs its change touched. If the push it merges onto failed a
@@ -451,8 +455,10 @@ names its own, for example `ci.yml`), `name` (`acceptance`), `max-age-hours`
 `endpoint` (default `CI_ARTIFACT_ENDPOINT`). Both modes need the commit checked
 out (a shallow clone is enough), `id-token: write` for the artifact gateway
 and `CI_ARTIFACT_ENDPOINT` (a repository secret). Outputs (verify): `reused`,
-`reason` and `green_parent` (`true`, `false`, or empty when verify stopped
-before asking).
+`remaining` (JSON array of the required jobs to run; the scope job's `jobs`
+output is `remaining || scope.jobs`, since verify does not run on pull
+requests), `reason` and `green_parent` (`true`, `false`, or empty when verify
+stopped before asking).
 
 The receipt proves only what the run's own validation proved. Possession of
 an archive is not trusted on its own: the run lookup, its conclusion and the
