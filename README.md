@@ -263,8 +263,10 @@ jobs:
     ...
   accepted:
     needs: [test, lint]
-    # Without a status function this runs only when every need succeeded.
-    if: github.event_name == 'pull_request'
+    # The status check must be explicit: with the default success(), the
+    # acceptance job, skipped on pull requests and upstream of every need,
+    # would skip this job too.
+    if: ${{ github.event_name == 'pull_request' && !cancelled() && !contains(needs.*.result, 'failure') && !contains(needs.*.result, 'cancelled') && !contains(needs.*.result, 'skipped') }}
     runs-on: <runner>
     permissions: {contents: read, id-token: write}
     steps:
