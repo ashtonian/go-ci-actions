@@ -202,9 +202,9 @@ def updated_at(run):
 class Verdict(typing.NamedTuple):
     reused: bool
     reason: str
-    # Whether the commit the merge sits on has a green trunk run of the
-    # workflow; None when verify stopped before asking.
-    green_parent: typing.Optional[bool] = None
+    # Whether the scope's base has a green trunk run of the workflow; None
+    # when verify stopped before asking or was given no base.
+    green_base: typing.Optional[bool] = None
     # The required jobs the push still runs; None is all of them.
     remaining: typing.Optional[list] = None
 
@@ -218,13 +218,22 @@ def green_runs(api, workflow, sha, branch, repository, run_id):
             and (run.get("repository") or {}).get("full_name") == repository and str(run.get("id")) != run_id]
 
 
+def scope_base():
+    """The commit the push's required jobs were measured from (the scope's base), or None."""
+    raw = artifact.input_value("base").strip()
+    if raw and not re.fullmatch(r"[0-9a-f]{40}", raw):
+        raise ValueError("base must be a full commit SHA: the scope action's base output")
+    return raw or None
+
+
 def verify(env, api=None, receipts=fetch_receipt, now=time.time):
-    """A Verdict. Anything short of a matching receipt on a green parent runs the push's checks."""
+    """A Verdict. Anything short of a matching receipt on a green base runs the push's checks."""
     # An invalid input is a workflow error, not missing evidence: it fails the step.
     required = required_jobs()
+    base = scope_base()
     if env.get("GITHUB_EVENT_NAME") != "push":
         return Verdict(False, "only a push reuses pull request validation")
-    green_parent = None
+    green_base = None
     try:
         payload = event(env)
         branch = payload["repository"]["default_branch"]
@@ -236,34 +245,37 @@ def verify(env, api=None, receipts=fetch_receipt, now=time.time):
         if (source["sha"] != env["GITHUB_SHA"] or len(source["parents"]) != 2
                 or source["parents"][0] != payload.get("before")):
             return Verdict(False, "the push is not a single merge commit on the previous head")
-        parent, head = source["parents"]
+        head = source["parents"][1]
         repository = env["GITHUB_REPOSITORY"]
         workflow = workflow_path(env)
         api = api or GitHub(env)
-        # A pull request's scoped run proves only the jobs its change touched.
-        # On a red parent, a job it skipped may be the one failing, and a
-        # reused push would turn that red into the next green base.
-        green_parent = bool(green_runs(api, workflow, parent, branch, repository, env.get("GITHUB_RUN_ID", "")))
-        if not green_parent:
-            return Verdict(False, f"the merge's parent {parent} has no green run of {Path(workflow).name}: "
-                           "the push runs its scoped checks", False)
+        # The push needs only the required jobs because every other job's
+        # inputs are unchanged since base, so base must have passed them: a
+        # required list measured from a red commit could leave out the job
+        # that is failing, and reusing the rest would make this push the
+        # next green base with that failure unchecked.
+        if base is not None:
+            green_base = bool(green_runs(api, workflow, base, branch, repository, env.get("GITHUB_RUN_ID", "")))
+            if not green_base:
+                return Verdict(False, f"the scope's base {base} has no green run of {Path(workflow).name}: "
+                               "the push runs its scoped checks", False)
         runs = api.get(f"actions/workflows/{urllib.parse.quote(Path(workflow).name)}/runs",
                        head_sha=head, event="pull_request", per_page=100)["workflow_runs"]
         runs = [run for run in runs if run.get("head_sha") == head and run.get("event") == "pull_request"
                 and (run.get("repository") or {}).get("full_name") == repository
                 and (run.get("head_repository") or {}).get("full_name") == repository]
         if not runs:
-            return Verdict(False, "no pull request run validated " + head, green_parent)
+            return Verdict(False, "no pull request run validated " + head, green_base)
         run = max(runs, key=lambda item: (item["updated_at"], item["id"]))
         max_age = float(artifact.input_value("max-age-hours", "6") or "6") * 3600
         if run.get("status") != "completed" or run.get("conclusion") != "success":
-            return Verdict(False, f"the latest pull request run did not pass: {run.get('html_url', run['id'])}", green_parent)
+            return Verdict(False, f"the latest pull request run did not pass: {run.get('html_url', run['id'])}", green_base)
         if not 0 <= now() - updated_at(run) <= max_age:
             return Verdict(False, f"the latest pull request run is older than the receipt lifetime: {run.get('html_url', run['id'])}",
-                           green_parent)
+                           green_base)
         receipt = receipts(run, receipt_name())
         if receipt is None:
-            return Verdict(False, f"the pull request run stored no receipt: {run.get('html_url', run['id'])}", green_parent)
+            return Verdict(False, f"the pull request run stored no receipt: {run.get('html_url', run['id'])}", green_base)
         expected = {"version": RECEIPT_VERSION, "repository": repository, "workflow": workflow,
                     "run_id": run["id"], "run_attempt": run["run_attempt"], "variables": variables_digest()}
         differs = sorted(key for key, value in expected.items() if receipt.get(key) != value)
@@ -273,28 +285,28 @@ def verify(env, api=None, receipts=fetch_receipt, now=time.time):
         if (recorded.get("parents") or [])[1:] != [head]:
             differs.append("head")
         if differs:
-            return Verdict(False, "the receipt does not match this push (" + ", ".join(differs) + "): every check runs", green_parent)
+            return Verdict(False, "the receipt does not match this push (" + ", ".join(differs) + "): every check runs", green_base)
         passed, skipped = receipt.get("passed"), receipt.get("skipped")
         if not isinstance(passed, list) or not isinstance(skipped, list):
-            return Verdict(False, "the receipt does not list its passed and skipped jobs: every check runs", green_parent)
-        where = f"{run.get('html_url', run['id'])} on green parent {parent}"
+            return Verdict(False, "the receipt does not list its passed and skipped jobs: every check runs", green_base)
+        where = f"{run.get('html_url', run['id'])}" + (f" on green base {base}" if base else "")
         if required is None:
             # Unscoped, every job the pull request recorded must have run and passed.
             if skipped:
                 return Verdict(False, f"the pull request run did not pass {', '.join(sorted(set(skipped)))}: "
-                               f"{where}: every check runs", green_parent)
-            return Verdict(True, f"tree {source['tree']} passed in {where}", True)
+                               f"{where}: every check runs", green_base)
+            return Verdict(True, f"tree {source['tree']} passed in {where}", green_base)
         # A job that passed on this tree needs no second run, whatever else
         # the push requires; the rest run.
         remaining = [name for name in required if name not in passed]
         if remaining:
             reusable = [name for name in required if name in passed]
             return Verdict(False, f"tree {source['tree']} passed {', '.join(reusable) or 'none of the required jobs'} in "
-                           f"{where}; the push runs {', '.join(remaining)}", True, remaining)
-        return Verdict(True, f"tree {source['tree']} passed in {where}", True, [])
+                           f"{where}; the push runs {', '.join(remaining)}", green_base, remaining)
+        return Verdict(True, f"tree {source['tree']} passed in {where}", green_base, [])
     except (KeyError, TypeError, ValueError, AttributeError, OSError, subprocess.SubprocessError,
             zipfile.BadZipFile, urllib.error.URLError) as error:
-        return Verdict(False, f"acceptance evidence unavailable ({type(error).__name__}: {error}): every check runs", green_parent)
+        return Verdict(False, f"acceptance evidence unavailable ({type(error).__name__}: {error}): every check runs", green_base)
 
 
 def main():
@@ -308,7 +320,7 @@ def main():
     print(verdict.reason)
     artifact.output("reused", str(verdict.reused).lower())
     artifact.output("reason", verdict.reason.replace("\n", " "))
-    artifact.output("green_parent", "" if verdict.green_parent is None else str(verdict.green_parent).lower())
+    artifact.output("green_base", "" if verdict.green_base is None else str(verdict.green_base).lower())
     required = required_jobs()
     remaining = verdict.remaining if verdict.remaining is not None else required
     artifact.output("remaining", "" if remaining is None else json.dumps(remaining))

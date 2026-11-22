@@ -318,6 +318,7 @@ jobs:
         with:
           mode: verify
           required: ${{ steps.scope.outputs.jobs }}
+          base: ${{ steps.scope.outputs.base }}
           variables: ${{ toJSON(vars) }}
   test:
     needs: scope
@@ -387,11 +388,11 @@ same workflow file over it again repeats work whose result is known.
   run's scope or any other condition) as separate lists.
 - **verify** runs first in the push. It outputs `reused=true` only when the
   push is the first attempt of a push to the default branch, the pushed commit
-  is a merge whose first parent is the previous head (`before`), the latest
-  commit it merges onto (its first parent) has a successful run of the same
-  workflow file on the default branch (`green_parent`), the latest pull
-  request run of that workflow for its second parent completed
-  successfully within `max-age-hours` (6), that run's final attempt stored a
+  is a merge whose first parent is the previous head (`before`), `base` (the
+  scope's base) has a successful run of the same workflow file on the
+  default branch (`green_base`), the latest pull request run of that workflow
+  for the merge's second parent completed successfully within
+  `max-age-hours` (6), that run's final attempt stored a
   receipt with the same tree, head, workflow file, variables digest, run ID
   and attempt, and every job in `required` passed in it. `required` is the
   push's own scope (the scope action's `jobs` output). Reuse is per job:
@@ -399,19 +400,27 @@ same workflow file over it again repeats work whose result is known.
   receipt does not show passed (a job the pull request skipped, such as a
   heavy suite it runs only with `full-ci`), so the rest are skipped even when
   some must run; `reused` is true when none remain. Without a matching receipt
-  on a green parent `remaining` is every required job. With `required` empty,
+  on a green base `remaining` is every required job. With `required` empty,
   every job the receipt names must have passed and `remaining` is empty.
   Anything else, an API or storage error included, gives `reused=false` with
   the reason in `reason`, the log and the job summary, and the push's jobs
   run. Only invalid inputs fail the step.
 
-The green parent closes a gap scoped runs open. A pull request's receipt
-proves only the jobs its change touched. If the push it merges onto failed a
-job the pull request skipped, reusing the receipt would turn that red trunk
-commit into the next green base and the failure would never be checked again.
-So a push onto a parent without a green run of the workflow runs its scoped
-checks, measured from the last green run. The nightly full run is the
-backstop for anything else on trunk.
+Why the base must be green. The push runs only `required` because every
+other job's inputs are unchanged since `base`, which is sound only if `base`
+passed them. The scope measures a push from the last green run of the
+workflow, so a change that broke a job since then puts that job in
+`required`, and if the pull request skipped it, in `remaining`: it runs. The
+green-base check re-verifies that premise. **Compute `required` with the
+scope action and pass its `base`**; a `required` measured from any other
+commit (the parent, the pull request's base) voids the guarantee, because a
+job failing on that commit may be left out. A failure with no input change
+(a flaky test, a new vulnerability advisory) is in no scope; the nightly full
+run catches it. `base` may be older than the parent: a path-filtered workflow
+that did not run there, a called workflow whose green runs on the branch are
+nightly ones, or a parent whose run had not finished. With `base` empty, as
+when the scope selected every job, there is nothing to check: each required
+job passed on this tree or runs.
 
 Tree equality covers the workflow file and everything else in the repository.
 Repository variables are compared through their digest; secrets, the runner
@@ -447,6 +456,7 @@ they still run when that job is skipped on pull requests.
 
 Inputs: `mode` (`record` or `verify`, required), `results` (record:
 `toJSON(needs)`), `required` (verify: a JSON array or one job ID per line),
+`base` (verify: the scope's `base` output),
 `variables` (`toJSON(vars)`, default `{}`; pass the same in both modes),
 `workflow` (the workflow file holding the receipts, default the running
 workflow; a workflow called with `workflow_call` sees its caller's file, so it
@@ -457,8 +467,8 @@ out (a shallow clone is enough), `id-token: write` for the artifact gateway
 and `CI_ARTIFACT_ENDPOINT` (a repository secret). Outputs (verify): `reused`,
 `remaining` (JSON array of the required jobs to run; the scope job's `jobs`
 output is `remaining || scope.jobs`, since verify does not run on pull
-requests), `reason` and `green_parent` (`true`, `false`, or empty when verify
-stopped before asking).
+requests), `reason` and `green_base` (`true`, `false`, or empty without
+`base` or when verify stopped before asking).
 
 The receipt proves only what the run's own validation proved. Possession of
 an archive is not trusted on its own: the run lookup, its conclusion and the
@@ -469,8 +479,8 @@ the push run's acceptance step: `no pull request run validated <sha>` means the
 merge was not a merge commit of a tested head, `older than the receipt
 lifetime` means the pull request sat longer than `max-age-hours`, `did not pass
 <jobs>` means the push needs jobs the pull request's scope skipped (its base
-differed from the push's), `has no green run` means the commit the merge sits
-on failed, is still running, or never ran the workflow, and an `acceptance
+differed from the push's), `has no green run` means the scope's base did not pass
+the workflow (re-run its trunk run, or wait for the next push), and an `acceptance
 evidence unavailable` reason names the API or gateway error.
 
 ## Unchanged scheduled runs

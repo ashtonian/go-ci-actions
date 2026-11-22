@@ -77,7 +77,9 @@ that cannot be known. A push is measured from the last green run of its
 workflow, not from `before`: a cancelled or failed predecessor would otherwise
 drop its changes from every later run. A pull request's receipt records the
 jobs its scope skipped as skipped, and a push reuses it only for jobs the
-receipt shows passed, because the two runs measure from different bases. For
+receipt shows passed, because the two runs measure from different bases, and
+only when the push's base has a green run: the jobs left out of `required`
+are trusted because that base passed them. For
 Go, a file maps to a package and the affected set follows the test-inclusive
 reverse dependency graph from `go list -e -test`, which sees cross-module
 imports in a workspace and test-only imports. Every unresolved case (a
