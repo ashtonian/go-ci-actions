@@ -254,10 +254,13 @@ def verify(env, api=None, receipts=fetch_receipt, now=time.time):
         # required list measured from a red commit could leave out the job
         # that is failing, and reusing the rest would make this push the
         # next green base with that failure unchecked.
-        if base is not None:
-            green_base = bool(green_runs(api, workflow, base, branch, repository, env.get("GITHUB_RUN_ID", "")))
+        # Without base, as in a v1.8.0 caller, the parent stands in for it.
+        checked = base or (source["parents"][0] if required is not None else None)
+        if checked is not None:
+            green_base = bool(green_runs(api, workflow, checked, branch, repository, env.get("GITHUB_RUN_ID", "")))
             if not green_base:
-                return Verdict(False, f"the scope's base {base} has no green run of {Path(workflow).name}: "
+                what = f"the scope's base {checked}" if base else f"the merge's parent {checked} (no base given)"
+                return Verdict(False, f"{what} has no green run of {Path(workflow).name}: "
                                "the push runs its scoped checks", False)
         runs = api.get(f"actions/workflows/{urllib.parse.quote(Path(workflow).name)}/runs",
                        head_sha=head, event="pull_request", per_page=100)["workflow_runs"]
@@ -289,7 +292,7 @@ def verify(env, api=None, receipts=fetch_receipt, now=time.time):
         passed, skipped = receipt.get("passed"), receipt.get("skipped")
         if not isinstance(passed, list) or not isinstance(skipped, list):
             return Verdict(False, "the receipt does not list its passed and skipped jobs: every check runs", green_base)
-        where = f"{run.get('html_url', run['id'])}" + (f" on green base {base}" if base else "")
+        where = f"{run.get('html_url', run['id'])}" + (f" on green base {checked}" if checked else "")
         if required is None:
             # Unscoped, every job the pull request recorded must have run and passed.
             if skipped:

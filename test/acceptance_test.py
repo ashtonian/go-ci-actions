@@ -307,18 +307,23 @@ class AcceptanceTests(unittest.TestCase):
                                                 {"head_sha": green, "branch": "main", "status": "success", "per_page": 100}))
                 self.assertIn("on green base " + green, reason)
 
-    def test_without_a_base_only_the_required_jobs_count(self):
-        # The scope selected every job (no green run to measure from): each
-        # job either passed on this tree or runs, so no base is needed.
+    def test_without_a_base_the_parent_must_be_green(self):
+        # A caller that passes no base, such as one bumped from v1.8.0
+        # unedited, keeps v1.8.0's check on the merge's parent.
         with patch.dict(os.environ, {"INPUT_BASE": "", "INPUT_REQUIRED": '["lint", "test"]'}):
+            (reused, reason), api = self.verify()
+            self.assertTrue(reused, reason)
+            self.assertIs(self.verdict.green_base, True)
+            self.assertEqual(api.calls[0][1]["head_sha"], self.fixture.base, "the parent")
+            (reused, reason), _ = self.verify(trunk=[])
+            self.assertFalse(reused, reason)
+            self.assertIn("(no base given)", reason)
+        # Unscoped, the pull request ran every job on this tree: no trunk check.
+        with patch.dict(os.environ, {"INPUT_BASE": "", "INPUT_REQUIRED": ""}):
             (reused, reason), api = self.verify(trunk=[])
             self.assertTrue(reused, reason)
             self.assertIsNone(self.verdict.green_base)
-            self.assertEqual([call[1].get("event") for call in api.calls], ["pull_request"], "no trunk lookup")
-        with patch.dict(os.environ, {"INPUT_BASE": "", "INPUT_REQUIRED": '["lint", "image"]'}):
-            (reused, reason), _ = self.verify(trunk=[])
-            self.assertFalse(reused, reason)
-            self.assertEqual(self.verdict.remaining, ["image"])
+            self.assertEqual([call[1].get("event") for call in api.calls], ["pull_request"])
 
     def test_invalid_base_fails_the_step(self):
         for base in ("abc", "G" * 40, "a" * 39):

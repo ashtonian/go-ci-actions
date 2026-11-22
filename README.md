@@ -418,9 +418,11 @@ job failing on that commit may be left out. A failure with no input change
 (a flaky test, a new vulnerability advisory) is in no scope; the nightly full
 run catches it. `base` may be older than the parent: a path-filtered workflow
 that did not run there, a called workflow whose green runs on the branch are
-nightly ones, or a parent whose run had not finished. With `base` empty, as
-when the scope selected every job, there is nothing to check: each required
-job passed on this tree or runs.
+nightly ones, or a parent whose run had not finished. Without `base` (a
+caller bumped from v1.8.0 unedited, or a full scope with no green run to
+measure from), the merge's parent must have a green run instead, as in
+v1.8.0. Unscoped (no `required`), the pull request ran every job on this tree
+and nothing is checked.
 
 Tree equality covers the workflow file and everything else in the repository.
 Repository variables are compared through their digest; secrets, the runner
@@ -467,11 +469,12 @@ out (a shallow clone is enough), `id-token: write` for the artifact gateway
 and `CI_ARTIFACT_ENDPOINT` (a repository secret). Outputs (verify): `reused`,
 `remaining` (JSON array of the required jobs to run; the scope job's `jobs`
 output is `remaining || scope.jobs`, since verify does not run on pull
-requests), `reason` and `green_base` (`true`, `false`, or empty without
-`base` or when verify stopped before asking). `green_parent` is a deprecated
+requests), `reason` and `green_base` (`true`, `false`, or empty when unscoped
+or when verify stopped before asking). `green_parent` is a deprecated
 copy of `green_base`, kept for one minor release so v1.8.0 and v1.9.0
-consumers can bump without edits, and removed in v1.11.0; a consumer that
-does not pass `base` gets no base check, so pass it when bumping.
+consumers can bump without edits, and removed in v1.11.0. Such a consumer,
+passing no `base`, keeps v1.8.0's green-parent check; passing `base` lets
+path-filtered and called workflows reuse.
 
 The receipt proves only what the run's own validation proved. Possession of
 an archive is not trusted on its own: the run lookup, its conclusion and the
