@@ -30,8 +30,11 @@ inputs:
   lookback:
     description: "How many of the newest successful runs on the branch to consult for a push's base, from 1 through 100."
     default: "20"
+  path:
+    description: "The checkout's directory under the workspace, as actions/checkout's path: git runs there, and the workflow files, every glob and go-directory are relative to it."
+    default: "."
   go-directory:
-    description: "Directory holding go.work or go.mod, relative to the workspace, for jobs that name Go packages."
+    description: "Directory holding go.work or go.mod, relative to path, for jobs that name Go packages."
     default: "."
   go-tags:
     description: 'Build tag sets for loading the package graph, one per line ("unit,integration"; "-" is the empty set), so files behind them count. Each is loaded for every go-builds line and the graphs unioned.'

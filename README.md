@@ -393,10 +393,15 @@ changed".
   the checkout is not that merge, which can only widen the diff). A merge
   group is measured from its `base_sha`. A push to a branch is measured from
   the head of the newest successful run of the same workflow file on that
-  branch (events push, schedule, workflow_dispatch or merge_group, this
-  repository, not the running run; the newest `lookback` (20) are consulted),
-  so a push whose predecessor failed or was cancelled still checks that
-  predecessor's changes. A shallow checkout is enough: the base commit is
+  branch (this repository, not the running run; the newest `lookback` (20)
+  are consulted), so a push whose predecessor failed or was cancelled still
+  checks that predecessor's changes. Only `push` and `schedule` runs count:
+  a push ran the scope measured from an earlier base and a schedule ran
+  everything, while a `workflow_dispatch` can narrow its work through inputs
+  the scope never sees (a fast-runner dispatch), so a green one is no base.
+  acceptance's green-base check counts the same runs. A push run must not
+  narrow its jobs by anything but the scope's outputs, or this induction
+  breaks. A shallow checkout is enough: the base commit is
   fetched with the job token when it is missing.
 - **Full runs.** `workflow_dispatch`, a pull request labelled `full-label`
   (`full-ci`), `full: true`, a tag push and any other event run every job and
@@ -519,8 +524,12 @@ default `workflow`. A reusable workflow that scopes its own jobs while its
 caller's runs are the trunk history leaves `workflow` empty and names itself
 here; one whose own runs are the history, called by a release, sets
 `workflow` to itself instead),
-`lookback` (20, 1-100), `go-directory` (`.`), `go-tags` (tag sets, one per
-line), `go-builds`,
+`lookback` (20, 1-100), `path` (`.`: the checkout's directory under the
+workspace, as actions/checkout's `path`; git runs there and the workflow
+files, every glob, `files` and `go-directory` are relative to it, so a
+repository whose go.mod replaces siblings such as `../gox` can be checked out
+at `estavelle/` beside them), `go-directory` (`.`), `go-tags` (tag sets, one
+per line), `go-builds`,
 `go-ignore`, `go-owners` (JSON, glob to package directories) and `token`
 (`github.token`; needs `actions: read` for a push and `contents: read`).
 Outputs: `full` (`true` when every job and package is in scope), `jobs` (JSON
@@ -664,7 +673,8 @@ other job on `needs.<job>.outputs.reused != 'true'` with `!cancelled()` so
 they still run when that job is skipped on pull requests.
 
 Inputs: `mode` (`record` or `verify`, required), `results` (record:
-`toJSON(needs)`), `required` (verify: a JSON array or one job ID per line),
+`toJSON(needs)`), `path` (`.`, the checkout's directory, as for scope),
+`required` (verify: a JSON array or one job ID per line),
 `base` (verify: the scope's `base` output), `selections` (both modes: the
 scope's `selections` output),
 `variables` (`toJSON(vars)`, default `{}`; pass the same in both modes),

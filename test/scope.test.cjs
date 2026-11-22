@@ -412,3 +412,32 @@ test('packaged action reads job IDs from jobs-workflow, history from workflow', 
   await assert.rejects(runScope(t, repo, {event: 'pull_request', payload: pull,
     inputs: {INPUT_JOBS: jobs, 'INPUT_JOBS-WORKFLOW': '../x.yml'}}), /jobs-workflow must be a file name/);
 });
+
+test('packaged action works on a checkout in a subdirectory beside a replaced sibling', async t => {
+  let go = true;
+  try { execFileSync('go', ['version'], {stdio: 'ignore'}); } catch { go = false; }
+  if (!go && !process.env.GITHUB_ACTIONS) return t.skip('go is not on PATH');
+  // estavelle's layout: the repository at estavelle/, and gox/ beside it,
+  // which its go.mod replaces.
+  const checkout = repository(t, {
+    'go.mod': 'module example.com/est\n\ngo 1.22\n\nrequire example.com/gox v0.0.0\n\nreplace example.com/gox => ../gox\n',
+    'a/a.go': 'package a\n\nimport _ "example.com/gox/lib"\n',
+    'b/b.go': 'package b\n\nimport _ "example.com/est/a"\n',
+    'docs/guide.md': 'guide\n',
+  }, {'a/a.go': 'package a\n\nimport _ "example.com/gox/lib"\n\nconst X = 1\n'});
+  const workspace = path.join(checkout.root, 'ws');
+  fs.mkdirSync(workspace);
+  fs.renameSync(checkout.workspace, path.join(workspace, 'estavelle'));
+  write(path.join(workspace, 'gox'), {'go.mod': 'module example.com/gox\n\ngo 1.22\n', 'lib/lib.go': 'package lib\n'});
+  const repo = {...checkout, workspace};
+  const jobs = JSON.stringify({test: {go: ['./...']}, docs: ['docs/**']});
+  const {outputs} = await runScope(t, repo, {event: 'pull_request',
+    payload: {pull_request: {head: {sha: checkout.head}, base: {sha: checkout.base}, labels: []}},
+    inputs: {INPUT_JOBS: jobs, INPUT_PATH: 'estavelle', 'INPUT_GO-IGNORE': 'docs/**'}});
+  assert.equal(outputs.base, checkout.base);
+  assert.deepEqual(JSON.parse(outputs.jobs), ['test']);
+  assert.deepEqual(JSON.parse(outputs['go-packages']), {'.': ['./a', './b']});
+  assert.equal(fs.readFileSync(outputs.files, 'utf8'), 'a/a.go\n', 'paths relative to the checkout');
+  await assert.rejects(runScope(t, repo, {event: 'pull_request', payload: {pull_request: {head: {sha: checkout.head}}},
+    inputs: {INPUT_JOBS: jobs, INPUT_PATH: '../elsewhere'}}), /path must stay inside the workspace/);
+});

@@ -24,6 +24,9 @@ inputs:
   workflow:
     description: "Workflow file whose pull request runs hold the receipts. Empty is the running workflow; a called workflow names its own file."
     default: ""
+  path:
+    description: "The checkout's directory under the workspace, as actions/checkout's path; the commit is read there."
+    default: "."
   name:
     description: "Receipt artifact name."
     default: acceptance
@@ -54,6 +57,7 @@ runs:
   steps:
     - id: acceptance
       shell: bash
+      working-directory: ${{ inputs.path }}
       env:
         INPUT_MODE: ${{ inputs.mode }}
         INPUT_RESULTS: ${{ inputs.results }}

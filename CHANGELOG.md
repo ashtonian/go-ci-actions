@@ -20,6 +20,13 @@ with the tag as a comment (`@<sha> # vX.Y.Z`).
   `go-ignore` (some-with-excludes); a list of only excludes fails.
 - **scope:** `jobs-workflow` names the file defining the job IDs, for a
   reusable workflow whose caller's runs are the history.
+- **scope, acceptance:** `path`, the checkout's directory under the
+  workspace, for a repository checked out beside the siblings its go.mod
+  replaces.
+- **scope, acceptance:** only `push` and `schedule` runs make a base green;
+  a green `workflow_dispatch` can be a narrowed run.
+- **acceptance:** a job with no recorded selection (one that ran in a reduced
+  mode the scope did not select) covers only an empty selection.
 
 ## v1.10.0 (do not pass `base`)
 
