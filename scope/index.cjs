@@ -5,7 +5,7 @@ const os = require('node:os');
 const path = require('node:path');
 const {input, output} = require('../lib/policy.cjs');
 const {github, workflowFile} = require('../lib/history.cjs');
-const {SHA, decideBase, lines, matcher, parseConfig, parseOwners, selectJobs} = require('../lib/scope.cjs');
+const {SHA, decideBase, lines, matcher, parseConfig, parseOwners, selectJobs, workflowJobs} = require('../lib/scope.cjs');
 const {LIST_FIELDS, affectedPackages, byModule, parseStream, rootDirs} = require('../lib/goaffected.cjs');
 const GIT_TIMEOUT_MS = 120000;
 const GO_TIMEOUT_MS = 600000;
@@ -86,6 +86,10 @@ async function main() {
   const token = input('token');
   const get = github(env, token);
   const workflow = input('workflow') || workflowFile(env);
+  if (!/^[A-Za-z0-9._-]+\.ya?ml$/.test(workflow)) throw new Error('workflow must be a file name under .github/workflows');
+  const defined = workflowJobs(fs.readFileSync(path.join(env.GITHUB_WORKSPACE, '.github', 'workflows', workflow), 'utf8'));
+  const unknown = config.jobs.map(job => job.id).filter(id => !defined.has(id));
+  if (unknown.length) throw new Error('jobs names IDs ' + workflow + ' does not define: ' + unknown.join(', '));
   const head = headCommit();
   let decision;
   try {

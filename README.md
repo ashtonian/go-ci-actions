@@ -328,7 +328,9 @@ listing the changed paths, one per line; empty for a full run), `reason`,
 the package directories to check relative to the module, `"./..."` for all;
 modules with nothing affected are absent) and `go-reason`. The log lists the
 changed files, each job's decision and why, and the Go packages; the job
-summary repeats the decision. Invalid `jobs`, globs or patterns fail the step.
+summary repeats the decision. Invalid `jobs`, globs or patterns fail the step,
+and so does a job ID the workflow file does not define (a typo would otherwise
+leave that job never selected).
 
 When a job ran that should not have, or the other way round, read the scope
 step's log: each job line names the file or package that selected it, and

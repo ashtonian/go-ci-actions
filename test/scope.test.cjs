@@ -1,7 +1,7 @@
 'use strict';
 const {test} = require('node:test');
 const assert = require('node:assert/strict');
-const {decideBase, globRegExp, goPattern, parseConfig, parseOwners, selectJobs} = require('../lib/scope.cjs');
+const {decideBase, globRegExp, goPattern, parseConfig, parseOwners, selectJobs, workflowJobs} = require('../lib/scope.cjs');
 
 const A = 'a'.repeat(40), B = 'b'.repeat(40), C = 'c'.repeat(40), H = 'd'.repeat(40);
 
@@ -44,6 +44,13 @@ test('the configuration is validated', () => {
     '{"a": {"other": ["x"]}}', '{"a": "x"}', '{"a": ["/abs"]}', '{"a": {"go": ["cmd"]}}']) {
     assert.throws(() => parseConfig(raw, ''), Error, raw);
   }
+});
+
+test('the job IDs of a workflow file are its top-level jobs keys', () => {
+  const text = ['name: ci', 'on:', '  push:', 'env:', '  lint: x', 'jobs:', '  # a comment', '  scope:', '    runs-on: x',
+    '    steps:', '      - id: lint', '  test: # tests', '    needs: scope', '  build-and-scan:', 'other:', '  late:'].join('\n');
+  assert.deepEqual([...workflowJobs(text)], ['scope', 'test', 'build-and-scan']);
+  assert.deepEqual([...workflowJobs('jobs:\n    a:\n      b:\n    c:\n')], ['a', 'c']);
 });
 
 test('go-owners maps globs to the packages that read them', () => {
@@ -178,7 +185,7 @@ function repository(t, files = {'README.md': 'base\n', 'docs/guide.md': 'guide\n
   fs.mkdirSync(origin);
   git(origin, 'init', '-q');
   git(origin, 'config', 'uploadpack.allowAnySHA1InWant', 'true');
-  write(origin, files);
+  write(origin, {...files, '.github/workflows/ci.yml': 'on: push\njobs:\n  docs:\n  image:\n  test:\n'});
   git(origin, 'add', '.');
   git(origin, 'commit', '-q', '-m', 'base');
   const base = git(origin, 'rev-parse', 'HEAD');
@@ -292,4 +299,11 @@ test('packaged action narrows Go jobs to the affected packages', async t => {
   assert.deepEqual(JSON.parse(unignored.outputs.jobs), ['test', 'image', 'docs'], 'an unowned file affects every package');
   assert.deepEqual(JSON.parse(unignored.outputs['go-packages']), {'.': ['./...']});
   assert.match(unignored.outputs['go-reason'], /no package owns docs\/guide\.md/);
+});
+
+test('packaged action refuses a job the workflow does not define', async t => {
+  const repo = repository(t);
+  await assert.rejects(runScope(t, repo, {event: 'pull_request',
+    payload: {pull_request: {head: {sha: repo.head}, base: {sha: repo.base}, labels: []}},
+    inputs: {INPUT_JOBS: JSON.stringify({docs: ['docs/**'], lnit: ['**']})}}), /ci\.yml does not define: lnit/);
 });
