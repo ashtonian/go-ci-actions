@@ -78,9 +78,14 @@ exports GOLANGCI_LINT_CACHEPROG as the same plugin (unless the job sets it), so
 golangci-lint v2.13 and later stores its analysis cache through the plugin;
 staticcheck 2026.2 and later reads GOCACHEPROG itself. Both then hit across
 runners on the same terms as build objects: their keys cover sources,
-dependencies, the linter version and configuration (golangci-lint also salts
-with `--build-tags` and the module's `go.mod`), and the entries another ref can
-read come only from runs on a trusted ref (see *Who fills the shared cache*).
+dependencies, the linter version and configuration, and the entries another
+ref can read come only from runs on a trusted ref (see *Who fills the shared
+cache*). golangci-lint (v2.15.0, `computeGoModSalt`) also salts every key with
+the run's `--build-tags` and the whole content of the module's `go.mod`: lint
+runs with different tags share no analyses, and any change to a module's
+`go.mod`, a comment included, re-lints that module cold until a trusted-ref run
+stores its new entries. Measured in a Karsto pull request that bumped one
+dependency in its `go.mod`: every lookup for that module missed.
 
 Job containers can consume the same runner-owned setup through the mounted
 tool cache. Before accepting a job, the runner places a native executable at
