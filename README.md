@@ -244,8 +244,9 @@ changed".
   stay within a segment, dot files match, everything else is literal.
 - **Go packages.** When a job names Go package patterns (`./...`, `./dir/...`,
   `./dir`, `.`, relative to `go-directory`), the scope loads the package graph
-  of every module in the workspace with `go list -e -test` (with `go-tags`)
-  and computes the affected packages: each package that holds a changed file,
+  of every module in the workspace with `go list -e -test` (with `go-tags`),
+  once per `go-builds` configuration, unioned, and computes the affected
+  packages: each package that holds a changed file,
   plus every package whose build or tests depend on one, across modules. A
   file belongs to the package of its directory, of an ancestor whose
   `testdata` tree holds it, or that embeds it. A package that fails to load is
@@ -259,6 +260,19 @@ changed".
   `go-owners` entry: list documentation and other files no Go code reads in
   `go-ignore`, never code inputs. Grep the tests for `ReadFile`, `Open` and
   `Glob` of relative paths before narrowing either list.
+- **Build configurations.** A repository that builds for several platforms or
+  tag sets lists them in `go-builds`, one per line as `KEY=VALUE` pairs from
+  GOOS, GOARCH, GOARM, GOAMD64, GOARM64, CGO_ENABLED, GOEXPERIMENT and
+  `tags=a,b` (for example `GOOS=linux GOARCH=amd64`, `GOOS=windows`,
+  `tags=integration`). `go-tags` is added to every line. The graphs are
+  unioned: a package that builds only for Windows or only under a tag is
+  owned and its dependents found, and an error only some configurations hit
+  (build constraints excluding every file) does not make it broken. With
+  `go-builds` empty there is one configuration, the runner's own platform;
+  when it is set, only the listed ones load, so list the runner's platform
+  too (a line with only `tags=`, or its GOOS and GOARCH) when it matters. Each
+  configuration is one `go list` over the workspace, about a second on a
+  dozen-module workspace.
 
 The job IDs in `jobs` are the workflow's job IDs, and the jobs gate on the
 scope job's output with `contains(needs.scope.outputs.jobs, '"<id>"')` (a
@@ -318,8 +332,8 @@ jobs:
 Inputs: `jobs` (required), `shared`, `full` (`false`), `full-label`
 (`full-ci`), `workflow` (the workflow file whose green runs are a push's base;
 default the running workflow, and a called workflow names its own file),
-`lookback` (20, 1-100), `go-directory` (`.`), `go-tags`, `go-ignore`,
-`go-owners` (JSON, glob to package directories) and `token`
+`lookback` (20, 1-100), `go-directory` (`.`), `go-tags`, `go-builds`,
+`go-ignore`, `go-owners` (JSON, glob to package directories) and `token`
 (`github.token`; needs `actions: read` for a push and `contents: read`).
 Outputs: `full` (`true` when every job and package is in scope), `jobs` (JSON
 array of the selected job IDs, in `jobs` order), `wide-jobs` (the selected
