@@ -777,6 +777,60 @@ and `token` (`github.token`; needs `actions: read`). Outputs: `passed` and
 `reason`, which the log repeats. It makes at most `lookback + 1` API calls,
 each with a 10-second timeout.
 
+## Runner labels
+
+`ashtonian/go-ci-actions/runner-labels@FULL_COMMIT_SHA` fails a workflow that
+names a self-hosted runner label no runner of the repository carries. GitHub
+never assigns such a job: it waits until it is cancelled, and its run holds
+its concurrency group the whole time, so one stale label can stop a branch's
+CI for a day. Runner metrics cannot show it, because no runner ever takes the
+job. A static allowlist in each repository drifts as runner sets come and go;
+this asks the site's runner label service, which serves the labels of the
+runner sets that exist now for one repository: its own and its
+organization's.
+
+It reads every workflow in `workflows` (`.github/workflows`):
+
+- `runs-on` as a label, a flow or block list, or `labels:` beside a `group:`;
+- in an expression, each string literal that is a result
+  (`vars.RUNNER || 'arc-x'`, `cond && 'arc-a' || 'arc-b'`), not an operand
+  (`github.event_name == 'push'`), and each item of a literal JSON array
+  (`fromJSON('["arc-a","macos-latest"]')`);
+- through `${{ matrix.KEY }}`, the matrix's values for `KEY` and its
+  `include` entries';
+- the inputs named `runner` or `*-runner` of a reusable workflow call, and the
+  defaults of such inputs in `workflow_call`.
+
+A label passes when the list holds it, when it is a GitHub-hosted image
+(`ubuntu-*`, `windows-*`, `macos-*`), or when it matches an `allow` pattern.
+Anything else is an error annotated at its line. An expression with no
+literal (`${{ inputs.runner }}`) is checked where its value is written.
+
+The list comes from `labels-file` when given, else from `endpoint`, else from
+the runner's `CI_RUNNER_LABELS_URL`: `GET <endpoint>/v1/labels?repository=<owner>/<name>`
+answering `{"labels": [...]}`, with a 10-second timeout. Only a definitive
+list fails the step. When the service does not answer, answers anything but
+a label list, or no source is configured (a GitHub-hosted runner, a host
+outside the cluster), the step warns, writes `checked=false` and passes, so
+the service is never a hard dependency of every repository's CI; detecting
+queued jobs is the backstop.
+
+```yaml
+jobs:
+  lint:
+    runs-on: <runner>
+    steps:
+      - uses: actions/checkout@<sha>
+        with: {persist-credentials: false}
+      - uses: ashtonian/go-ci-actions/runner-labels@FULL_COMMIT_SHA
+```
+
+Inputs: `endpoint`, `labels-file` (a list, `{"labels": [...]}`, or
+`{scope: [...]}` keyed by owner and `owner/name`, as the site's
+`runner-labels.py labels` prints for a dev host), `repository`
+(`github.repository`), `workflows` and `allow` (fnmatch patterns, one per
+line). Output: `checked`. No token; the service needs none.
+
 ## Ownership and validation
 
 This repository owns toolchain/cache policy. Consumers own build/test commands.
@@ -811,8 +865,11 @@ after a same-size fixture edit. No npm dependencies. `test/acceptance_test.py`
 receipt is recorded only for a same-repository pull request merge commit with
 no failed or cancelled job, that it lists passed and skipped jobs apart, and
 that verify reuses validation only for a matching receipt that passed every
-required job, against a real Git merge fixture; the smoke job runs it. The
-history tests cover already-passed's decision over earlier runs and the
+required job, against a real Git merge fixture; the smoke job runs it.
+`test/runner_labels_test.py` covers every place a workflow names a runner, the
+scoped and per-scope label files, and that a missing, failing or malformed
+service passes with a warning while a definitive list fails; the smoke job
+runs it too. The history tests cover already-passed's decision over earlier runs and the
 packaged action against a stub API. The buildx-cache tests cover the tag per
 ref and platform, the GitHub-cache fallback, input validation, and the
 packaged action refusing a multi-platform cache on a two-node builder. The scope tests cover globs, Go package

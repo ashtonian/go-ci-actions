@@ -83,6 +83,13 @@ jobs:
       - run: npm test
       - name: Acceptance receipt contracts
         run: python3 -m unittest discover -s test -p acceptance_test.py
+      - name: Runner label check
+        run: python3 -m unittest discover -s test -p runner_labels_test.py
+      # This repository's own workflows, against the runner label service
+      # when the runner names one; it warns and passes when none answers.
+      - name: Check this repository's runner labels
+        if: runner.os == 'Linux'
+        uses: ./runner-labels
       - run: go test -race ./...
         working-directory: fixtures
       - name: Validate workflow syntax
