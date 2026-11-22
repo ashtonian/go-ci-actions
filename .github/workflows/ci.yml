@@ -304,6 +304,7 @@ jobs:
         run: |
           test "$BACKEND" = remote
           test "$GOCACHEPROG" = "$RUNNER_TEMP/plugin-bin/gocacheprog"
+          test "$GOLANGCI_LINT_CACHEPROG" = "$GOCACHEPROG"
           test "$GOCACHEPROG_DIR" = "$RUNNER_TEMP/gocacheprog"
           case "$KEY" in remote-probe-*-mod-*) ;; *) echo "unexpected key $KEY"; exit 1 ;; esac
           fixtures=$(python3 -c 'import hashlib, sys

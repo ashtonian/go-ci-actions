@@ -178,11 +178,14 @@ test('build cache backend follows what the runner provides', t => {
     RUNNER_TEMP: '/runner/temp', ACTIONS_ID_TOKEN_REQUEST_URL: 'https://token'};
   const cases = [
     {name: 'remote', env: runner, want: {backend: 'remote', dir: '/runner/temp/gocacheprog',
-      env: {GOCACHEPROG: plugin, GOCACHEPROG_DIR: '/runner/temp/gocacheprog'}, notices: []}},
+      env: {GOCACHEPROG: plugin, GOCACHEPROG_DIR: '/runner/temp/gocacheprog', GOLANGCI_LINT_CACHEPROG: plugin}, notices: []}},
     {name: 'remote read-only', mode: 'read-only', env: runner, want: {backend: 'remote', dir: '/runner/temp/gocacheprog',
-      env: {GOCACHEPROG: plugin, GOCACHEPROG_DIR: '/runner/temp/gocacheprog', GOCACHEPROG_READ_ONLY: 'true'}, notices: []}},
+      env: {GOCACHEPROG: plugin, GOCACHEPROG_DIR: '/runner/temp/gocacheprog', GOLANGCI_LINT_CACHEPROG: plugin,
+        GOCACHEPROG_READ_ONLY: 'true'}, notices: []}},
     {name: 'runner-chosen directory', env: {...runner, GOCACHEPROG_DIR: '/cache'}, want: {backend: 'remote', dir: '/cache',
-      env: {GOCACHEPROG: plugin, GOCACHEPROG_DIR: '/cache'}, notices: []}},
+      env: {GOCACHEPROG: plugin, GOCACHEPROG_DIR: '/cache', GOLANGCI_LINT_CACHEPROG: plugin}, notices: []}},
+    {name: 'job-chosen lint cache', env: {...runner, GOLANGCI_LINT_CACHEPROG: '/lint-cache'}, want: {backend: 'remote',
+      dir: '/runner/temp/gocacheprog', env: {GOCACHEPROG: plugin, GOCACHEPROG_DIR: '/runner/temp/gocacheprog'}, notices: []}},
     {name: 'no remote cache', env: {PATH: bin}, want: {backend: 'github', env: {}, notices: []}},
     {name: 'opted out', requested: 'github', env: runner, want: {backend: 'github', env: {}, notices: []}},
     {name: 'disabled', mode: 'off', env: runner, want: {backend: 'off', env: {}, notices: []}},

@@ -73,6 +73,15 @@ module cache. Without both signals, or with build-cache-backend github, build
 objects stay in the GitHub cache. A GOCACHEPROG inherited from the runner is
 cleared then, and in off mode, so each mode means what it says.
 
+Linters keep their caches there too. With the remote backend the action also
+exports GOLANGCI_LINT_CACHEPROG as the same plugin (unless the job sets it), so
+golangci-lint v2.13 and later stores its analysis cache through the plugin;
+staticcheck 2026.2 and later reads GOCACHEPROG itself. Both then hit across
+runners on the same terms as build objects: their keys cover sources,
+dependencies, the linter version and configuration (golangci-lint also salts
+with `--build-tags` and the module's `go.mod`), and the entries another ref can
+read come only from runs on a trusted ref (see *Who fills the shared cache*).
+
 Job containers can consume the same runner-owned setup through the mounted
 tool cache. Before accepting a job, the runner places a native executable at
 `$RUNNER_TOOL_CACHE/go-ci-cache/v1/gocacheprog` and writes `config.json` beside
@@ -170,13 +179,28 @@ else must keep `-count=1`: databases, containers, network services, processes
 it starts, the installed `git` or other tools, the wall clock, kernel features
 (io_uring availability, cgroups), hardware, randomness it does not seed, and
 files outside the module. Integration, E2E, benchmark and fuzz lanes keep
-`-count=1`, and a nightly that runs everything with `-count=1` is the
-backstop. A flag outside go test's cacheable set (`-benchtime`,
+`-count=1`. A flag outside go test's cacheable set (`-benchtime`,
 `-coverprofile`, `-cpu`, `-failfast`, `-fullpath`, `-list`, `-outputdir`,
 `-parallel`, `-run`, `-short`, `-skip`, `-timeout`, `-v`) disables result
 caching for the run: `-count=1` by convention, but also `-bench`, `-shuffle`
 and `-args`. Build flags such as `-race`, `-tags` and `-trimpath` are part of
 the test binary's identity and keep caching.
+
+**Who fills the shared cache.** A run with `-count=1` stores no result, and
+a remote cache that scopes writes by ref (the site's gate: trusted refs write
+the namespace every ref reads, any other ref only its own) keeps a pull
+request's results to that pull request. Results another pull request can
+reuse therefore come only from a cacheable run on a trusted ref. When pushes
+to the default branch skip work a pull request already passed (`acceptance`)
+or a change does not touch (`scope`), that run is the nightly. Make the
+nightly the backstop and the filler at once: run `go clean -testcache` first,
+then the same cacheable command the pull requests run. Every earlier result
+is then expired, so every test executes, and the results it stores are what
+the next day's pull requests replay. Measured on this repository's fixture:
+after `go clean -testcache` the next run executed and the one after replayed
+`(cached)`, while a `-count=1` run on a fresh cache left the next cacheable
+run to execute again. Environment-dependent lanes keep `-count=1` in the
+nightly too.
 `go test -json` replays cached packages with their `run`/`pass` events, so
 inventories built from `-json` keep working.
 
@@ -629,7 +653,7 @@ the in-cluster `arc-go-ci-actions` runners. Hosted macOS is opt-in through the
 repository variable `MACOS_CI=on`; it is excluded by default. The contracts cover
 successful cross-job save/restore, matrix isolation, failed-job
 save suppression, restore-only and disabled modes, and the remote backend's
-plugin environment and modules-only archive, a ready module proxy's GOPROXY and
+plugin environment (GOLANGCI_LINT_CACHEPROG included) and modules-only archive, a ready module proxy's GOPROXY and
 build-only archive, and the fallback when the proxy does not answer. A real
 job-container check uses Karsto's pinned Playwright runtime to verify remote
 object reuse from fresh local directories, and that a module proxy the runner
