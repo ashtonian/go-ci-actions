@@ -15,8 +15,9 @@ test('go list output parses object by object', () => {
 });
 
 // A workspace of three modules: app imports lib/sub (and lib only from an
-// external test), tool is independent, and lib/tagged builds only under the
-// "integration" tag.
+// external test, and lib/winonly only on Windows), tool is independent,
+// lib/tagged builds only under the "integration" tag and lib/winonly only
+// for Windows.
 const FILES = {
   'go.work': 'go 1.22\n\nuse (\n\t./lib\n\t./app\n\t./tool\n)\n',
   'lib/go.mod': 'module example.com/lib\n\ngo 1.22\n',
@@ -30,6 +31,8 @@ const FILES = {
   'app/go.mod': 'module example.com/app\n\ngo 1.22\n\nrequire example.com/lib v0.0.0\n',
   'app/main.go': 'package main\n\nimport _ "example.com/lib/sub"\n\nfunc main() {}\n',
   'app/main_test.go': 'package main_test\n\nimport (\n\t"testing"\n\n\t_ "example.com/lib"\n)\n\nfunc TestMain(t *testing.T) {}\n',
+  'lib/winonly/winonly_windows.go': 'package winonly\n',
+  'app/main_windows.go': 'package main\n\nimport _ "example.com/lib/winonly"\n',
   'tool/go.mod': 'module example.com/tool\n\ngo 1.22\n',
   'tool/tool.go': 'package tool\n',
 };
@@ -45,16 +48,17 @@ function workspace(t) {
   }
   return root;
 }
-function list(root, tags = '') {
-  const env = {...process.env, GOFLAGS: '', GOPROXY: 'off', GOTOOLCHAIN: 'local', GOWORK: path.join(root, 'go.work')};
-  const go = args => parseStream(execFileSync('go', args, {cwd: root, env, encoding: 'utf8'}));
+// The unioned graphs of each build configuration, as the scope action loads them.
+function list(root, builds) {
+  const base = {...process.env, GOFLAGS: '', GOPROXY: 'off', GOTOOLCHAIN: 'local', GOWORK: path.join(root, 'go.work')};
+  const go = (args, env = {}) => parseStream(execFileSync('go', args, {cwd: root, env: {...base, ...env}, encoding: 'utf8'}));
   const modules = go(['list', '-m', '-json']);
-  const entries = go(['list', '-e', '-test', '-json=' + LIST_FIELDS, ...(tags ? ['-tags', tags] : []),
-    ...modules.map(module => module.Path + '/...')]);
+  const entries = builds.flatMap(build => go(['list', '-e', '-test', '-json=' + LIST_FIELDS,
+    ...(build.tags ? ['-tags', build.tags] : []), ...modules.map(module => module.Path + '/...')], build.env));
   return {modules, entries};
 }
-function affected(root, files, {tags = '', exists = fs.existsSync, owners} = {}) {
-  const {modules, entries} = list(root, tags);
+function affected(root, files, {tags = '', builds = [{tags}], exists = fs.existsSync, owners} = {}) {
+  const {modules, entries} = list(root, builds);
   const result = affectedPackages({root, modules, entries, changed: files.map(file => path.join(root, file)), exists, owners});
   return {result, modules: byModule(root, modules, result), dirs: result.full ? [] : rootDirs(root, result),
     args: importArgs(modules, result)};
@@ -132,4 +136,16 @@ test('the import-path arguments run as one go test across the workspace', needsG
   assert.match(out, /example\.com\/lib\/sub/);
   // Package list mode: an unchanged rerun replays from the test cache.
   assert.match(execFileSync('go', ['test', ...args], {cwd: root, env, encoding: 'utf8'}), /ok\s+example\.com\/app\s+\(cached\)/);
+});
+
+test('the graphs of several build configurations are unioned', needsGo, t => {
+  const root = workspace(t);
+  const host = {tags: ''}, windows = {env: {GOOS: 'windows', GOARCH: 'amd64'}, tags: ''};
+  if (process.platform === 'win32') return t.skip('the host is the Windows configuration');
+  assert.match(affected(root, ['lib/winonly/winonly_windows.go']).result.reason, /no package owns lib\/winonly/,
+    'the host graph alone does not hold the Windows package');
+  assert.deepEqual(affected(root, ['lib/winonly/winonly_windows.go'], {builds: [host, windows]}).modules,
+    {app: ['.'], lib: ['./winonly']});
+  assert.deepEqual(affected(root, ['lib/sub/sub.go'], {builds: [host, windows, {tags: 'integration'}]}).modules,
+    {app: ['.'], lib: ['./sub', './tagged']}, 'each configuration adds what it builds');
 });

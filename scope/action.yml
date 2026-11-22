@@ -30,7 +30,15 @@ inputs:
     description: "Directory holding go.work or go.mod, relative to the workspace, for jobs that name Go packages."
     default: "."
   go-tags:
-    description: "Build tags for loading the package graph, so files behind them count."
+    description: "Build tags for loading the package graph, so files behind them count; added to every go-builds line."
+    default: ""
+  go-builds:
+    description: >-
+      Build configurations whose package graphs are unioned, one per line as
+      KEY=VALUE pairs (GOOS, GOARCH, GOARM, GOAMD64, GOARM64, CGO_ENABLED,
+      GOEXPERIMENT, tags=a,b), such as "GOOS=windows" or "GOOS=linux
+      tags=integration"; go-tags is added to each. Empty is the runner's own
+      platform.
     default: ""
   go-ignore:
     description: "Path globs, one per line, of changed files that affect no Go package (documentation). Any other file no package owns affects every package."

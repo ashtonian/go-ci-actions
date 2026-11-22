@@ -5,7 +5,8 @@ const os = require('node:os');
 const path = require('node:path');
 const {input, output} = require('../lib/policy.cjs');
 const {github, workflowFile} = require('../lib/history.cjs');
-const {SHA, decideBase, lines, matcher, parseConfig, parseOwners, selectJobs, workflowJobs} = require('../lib/scope.cjs');
+const {SHA, decideBase, describeBuild, lines, matcher, parseBuilds, parseConfig, parseOwners, selectJobs, workflowJobs} =
+  require('../lib/scope.cjs');
 const {LIST_FIELDS, affectedPackages, byModule, importArgs, parseStream, rootDirs} = require('../lib/goaffected.cjs');
 const GIT_TIMEOUT_MS = 120000;
 const GO_TIMEOUT_MS = 600000;
@@ -36,13 +37,13 @@ function ensureCommit(sha, env, token) {
 function changedFiles(base) {
   return git(['diff', '--no-renames', '--name-only', '-z', base, 'HEAD']).split('\0').filter(Boolean);
 }
-function go(args, cwd) {
+function go(args, cwd, env = {}) {
   return execFileSync('go', args, {cwd, encoding: 'utf8', timeout: GO_TIMEOUT_MS, maxBuffer: MAX_OUTPUT,
-    stdio: ['ignore', 'pipe', 'pipe']});
+    stdio: ['ignore', 'pipe', 'pipe'], env: {...process.env, ...env}});
 }
 // The affected Go packages for the changed files outside go-ignore, or every
 // package when the change set is unknown (a full run, a shared input).
-function goScope({full, sharedFull, files, workspace: given, directory, tags, ignore, owners}) {
+function goScope({full, sharedFull, files, workspace: given, directory, builds, ignore, owners}) {
   // go list reports resolved directories.
   const workspace = fs.realpathSync(given);
   const root = path.resolve(workspace, directory);
@@ -54,11 +55,14 @@ function goScope({full, sharedFull, files, workspace: given, directory, tags, ig
   if (full || sharedFull) return {root, modules, result: {full: true, reason: full ? 'a full run' : 'a shared input changed'}};
   const considered = files.filter(file => !ignore(file)).map(file => path.join(workspace, file));
   if (!considered.length) return {root, modules, result: {full: false, reason: 'no Go input changed', packages: []}};
-  const tagArgs = tags ? ['-tags', tags] : [];
-  let entries;
+  // One package graph per build configuration, unioned.
+  const entries = [];
   try {
-    entries = parseStream(go(['list', '-e', '-test', '-json=' + LIST_FIELDS, ...tagArgs,
-      ...modules.map(module => module.Path + '/...')], root));
+    for (const build of builds) {
+      const tagArgs = build.tags.length ? ['-tags', build.tags.join(',')] : [];
+      entries.push(...parseStream(go(['list', '-e', '-test', '-json=' + LIST_FIELDS, ...tagArgs,
+        ...modules.map(module => module.Path + '/...')], root, build.env)));
+    }
   } catch (error) {
     // Without the package graph the change cannot be narrowed.
     const detail = (error.stderr || error.message || '').toString().trim().split('\n').slice(-3).join(' ');
@@ -82,6 +86,7 @@ async function main() {
   if (!Number.isInteger(lookback) || lookback < 1 || lookback > 100) throw new Error('lookback must be from 1 through 100');
   const ignore = matcher(lines(input('go-ignore')));
   const owners = parseOwners(input('go-owners'));
+  const builds = parseBuilds(input('go-builds'), input('go-tags'));
   const payload = JSON.parse(fs.readFileSync(env.GITHUB_EVENT_PATH, 'utf8'));
   const token = input('token');
   const get = github(env, token);
@@ -118,7 +123,7 @@ async function main() {
   let goResult = null, goPackages = {}, goArgs = '';
   if (config.jobs.some(job => job.usesGo)) {
     const scoped = goScope({full: decision.full, sharedFull, files, workspace: env.GITHUB_WORKSPACE,
-      directory: input('go-directory') || '.', tags: input('go-tags'), ignore, owners});
+      directory: input('go-directory') || '.', builds, ignore, owners});
     goResult = {full: scoped.result.full, reason: scoped.result.reason,
       dirs: scoped.result.full ? [] : rootDirs(scoped.root, scoped.result)};
     goPackages = byModule(scoped.root, scoped.modules, scoped.result);
@@ -149,7 +154,10 @@ async function main() {
     const scope = runs && job.usesGo ? (selection.wide.includes(job.id) ? ', every package' : ', affected packages') : '';
     console.log('  ' + job.id + ': ' + (runs ? 'runs' + (why ? ' (' + why + scope + ')' : scope ? ' (' + scope.slice(2) + ')' : '') : 'skipped'));
   }
-  if (goResult) console.log('Go packages (' + goResult.reason + '): ' + JSON.stringify(goPackages));
+  if (goResult) {
+    console.log('Go package graph: ' + builds.map(describeBuild).join('; '));
+    console.log('Go packages (' + goResult.reason + '): ' + JSON.stringify(goPackages));
+  }
   summary(['### Scope', '', reason + '.', '', 'Jobs: ' + (selection.jobs.join(', ') || 'none') + '.',
     ...(goResult ? ['', 'Go packages (' + goResult.reason + '): `' + JSON.stringify(goPackages) + '`'] : [])]);
 }
