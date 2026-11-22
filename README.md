@@ -469,6 +469,7 @@ jobs:
       CI_ARTIFACT_ENDPOINT: ${{ secrets.CI_ARTIFACT_ENDPOINT }}
     outputs:
       jobs: ${{ steps.accepted.outputs.remaining || steps.scope.outputs.jobs }}
+      selections: ${{ steps.scope.outputs.selections }}
       wide-jobs: ${{ steps.scope.outputs.wide-jobs }}
       go-packages: ${{ steps.scope.outputs.go-packages }}
     steps:
@@ -497,6 +498,7 @@ jobs:
           mode: verify
           required: ${{ steps.scope.outputs.jobs }}
           base: ${{ steps.scope.outputs.base }}
+          selections: ${{ steps.scope.outputs.selections }}
           variables: ${{ toJSON(vars) }}
   test:
     needs: scope
@@ -523,7 +525,10 @@ line), `go-builds`,
 (`github.token`; needs `actions: read` for a push and `contents: read`).
 Outputs: `full` (`true` when every job and package is in scope), `jobs` (JSON
 array of the selected job IDs, in `jobs` order), `wide-jobs` (the selected
-jobs that check every package), `base`, `files` (a file
+jobs that check every package), `selections` (JSON object of each selected
+job to what it checks: the affected Go packages its patterns match, as import
+paths, or `"all"` for a job that checks everything or has no Go patterns;
+pass it to acceptance record and verify), `base`, `files` (a file
 listing the changed paths, one per line; empty for a full run), `reason`,
 `go-packages` (JSON object of module directory, relative to `go-directory`, to
 the package directories to check relative to the module, `"./..."` for all;
@@ -538,7 +543,9 @@ every affected package of the graph loaded with `go-tags`, including packages
 that exist only under a tag or hold only test files. `go test` and `go vet
 -tags ...` take them all; a command that names packages without the tags, or
 `go build`, refuses those two kinds by name, so leave them out first (`go list
--e` reports a tag-only package's error, and a test-only one has no `GoFiles`). The log lists the
+-e` reports a tag-only package's error, and a test-only one has no `GoFiles`).
+golangci-lint reads its arguments as directories, not import paths: give it
+`go-packages`' directories, or map `go-args` through `go list -f '{{.Dir}}'`. The log lists the
 changed files, each job's decision and why, and the Go packages; the job
 summary repeats the decision. Invalid `jobs`, globs or patterns fail the step,
 and so does a job ID `jobs-workflow` does not define (a typo would otherwise
@@ -567,8 +574,9 @@ same workflow file over it again repeats work whose result is known.
   `acceptance.json`, as the run's `acceptance` artifact in SeaweedFS
   (seven-day retention): the repository, workflow file, run ID and attempt,
   the merge commit's SHA, parents and tree, a SHA-256 of the repository
-  variables, and the jobs that passed and the jobs that were skipped (by the
-  run's scope or any other condition) as separate lists.
+  variables, the jobs that passed and the jobs that were skipped (by the
+  run's scope or any other condition) as separate lists, and `selections`,
+  what each job checked (the scope's output).
 - **verify** runs first in the push. It outputs `reused=true` only when the
   push is the first attempt of a push to the default branch, the pushed commit
   is a merge whose first parent is the previous head (`before`), `base` (the
@@ -577,35 +585,51 @@ same workflow file over it again repeats work whose result is known.
   for the merge's second parent completed successfully within
   `max-age-hours` (6), that run's final attempt stored a
   receipt with the same tree, head, workflow file, variables digest, run ID
-  and attempt, and every job in `required` passed in it. `required` is the
-  push's own scope (the scope action's `jobs` output). Reuse is per job:
-  `remaining` lists the required jobs the push still runs, those the matching
-  receipt does not show passed (a job the pull request skipped, such as a
-  heavy suite it runs only with `full-ci`), so the rest are skipped even when
-  some must run; `reused` is true when none remain. Without a matching receipt
+  and attempt, and every job in `required` passed in it having checked at
+  least what the push's scope selects for it. `required` and `selections`
+  are the push's own scope (the scope action's `jobs` and `selections`
+  outputs). Reuse is per job: `remaining` lists the required jobs the push
+  still runs, those the matching receipt does not show passed (a job the pull
+  request skipped, such as a heavy suite it runs only with `full-ci`) or
+  passed on a narrower selection, so the rest are skipped even when some must
+  run; `reused` is true when none remain. Without a matching receipt
   on a green base `remaining` is every required job. With `required` empty,
   every job the receipt names must have passed and `remaining` is empty.
   Anything else, an API or storage error included, gives `reused=false` with
   the reason in `reason`, the log and the job summary, and the push's jobs
   run. Only invalid inputs fail the step.
 
-Why the base must be green. The push runs only `required` because every
-other job's inputs are unchanged since `base`, which is sound only if `base`
-passed them. The scope measures a push from the last green run of the
-workflow, so a change that broke a job since then puts that job in
-`required`, and if the pull request skipped it, in `remaining`: it runs. The
-green-base check re-verifies that premise. **Compute `required` with the
-scope action and pass its `base`**; a `required` measured from any other
-commit (the parent, the pull request's base) voids the guarantee, because a
-job failing on that commit may be left out. A failure with no input change
-(a flaky test, a new vulnerability advisory) is in no scope; the nightly full
-run catches it. `base` may be older than the parent: a path-filtered workflow
-that did not run there, a called workflow whose green runs on the branch are
-nightly ones, or a parent whose run had not finished. Without `base` (a
-caller bumped from v1.8.0 unedited, or a full scope with no green run to
-measure from), the merge's parent must have a green run instead, as in
-v1.8.0. Unscoped (no `required`), the pull request ran every job on this tree
-and nothing is checked.
+Why this is sound. The push runs only `required` because every other job's
+inputs are unchanged since `base`, the last green run of the workflow, so
+`base` must be green. A required job the pull request passed on this tree is
+reused only if the pull request checked at least what the push needs: a job
+narrowed to the affected packages (or apps, or checks) checks a set measured
+from the pull request's base, while the push's set is measured from `base`,
+and when a red commit sits between them the push's set is larger. Push X
+breaks package `state` and its run fails, so `base` stays before X; a pull
+request on X touches only `media` and its `go` job tests `media`; the push
+needs `state` and `media`, the receipt shows only `media`, and `go` runs. A
+job's selection covers another when it is `"all"` or a superset; a job the
+receipt has no selection for is not reused. With `base` the parent, both
+sets are the same diff and every passed job is reused, as v1.8.0's green
+parent did; with an older `base`, a job is reused only when the extra
+commits touched nothing the pull request did not check.
+
+**Compute `required` and `selections` with the scope action and pass its
+`base`.** A job that narrows its work some other way (a step that runs only
+some checks, a render of only the affected apps) puts what it checks in
+`selections` itself, in both the pull request and the push. Without
+`selections`, verify ignores `base` and requires the merge's parent to have a
+green run, as in v1.8.0. With `base` empty, as when the scope selected every
+job, each selection is `"all"` and there is nothing older to compare.
+Unscoped (no `required`), the pull request ran every job on this tree and
+nothing is checked. A failure with no input change (a flaky test, a new
+vulnerability advisory) is in no scope; the nightly full run catches it.
+
+**v1.10.0: do not pass `base`.** It reused a narrowed job against an older
+`base` without comparing selections, so a red commit between `base` and the
+parent could go unchecked. Upgrade to v1.11.0, or leave `base` out on v1.10.0
+(it then checks the parent as v1.8.0 did).
 
 Tree equality covers the workflow file and everything else in the repository.
 Repository variables are compared through their digest; secrets, the runner
@@ -631,7 +655,7 @@ cancelled:
       - uses: actions/checkout@<sha>
         with: {persist-credentials: false}
       - uses: ashtonian/go-ci-actions/acceptance@FULL_COMMIT_SHA
-        with: {mode: record, results: "${{ toJSON(needs) }}", variables: "${{ toJSON(vars) }}"}
+        with: {mode: record, results: "${{ toJSON(needs) }}", selections: "${{ needs.scope.outputs.selections }}", variables: "${{ toJSON(vars) }}"}
 ```
 
 The verify step sits in the scope job (above). A workflow without a scope job
@@ -641,7 +665,8 @@ they still run when that job is skipped on pull requests.
 
 Inputs: `mode` (`record` or `verify`, required), `results` (record:
 `toJSON(needs)`), `required` (verify: a JSON array or one job ID per line),
-`base` (verify: the scope's `base` output),
+`base` (verify: the scope's `base` output), `selections` (both modes: the
+scope's `selections` output),
 `variables` (`toJSON(vars)`, default `{}`; pass the same in both modes),
 `workflow` (the workflow file holding the receipts, default the running
 workflow; a workflow called with `workflow_call` sees its caller's file, so it
@@ -655,8 +680,8 @@ output is `remaining || scope.jobs`, since verify does not run on pull
 requests), `reason` and `green_base` (`true`, `false`, or empty when unscoped
 or when verify stopped before asking). v1.10.0's `green_parent`, a
 deprecated copy of `green_base`, is gone; read `green_base`. A consumer that
-passes no `base` keeps v1.8.0's check on the merge's parent; passing `base`
-lets path-filtered and called workflows reuse.
+passes no `selections` keeps v1.8.0's check on the merge's parent; passing
+`base` and `selections` lets path-filtered and called workflows reuse.
 
 The receipt proves only what the run's own validation proved. Possession of
 an archive is not trusted on its own: the run lookup, its conclusion and the
@@ -770,7 +795,8 @@ the changed paths, a change to ci.yml runs everything, and documentation-only
 changes run nothing. Pull requests record a receipt; the merge push reuses it.
 workflow_dispatch runs everything.
 
-Release signed commits with immutable version tags. Upgrade consumers through
+Release signed commits with immutable version tags, and note each release in
+[CHANGELOG.md](CHANGELOG.md). Upgrade consumers through
 reviewed SHA changes and roll back to the previous SHA. Measure cold, warm,
 source-change, dependency-change and matrix behavior before cache policy
 changes; do not infer a speedup from unrelated repositories.

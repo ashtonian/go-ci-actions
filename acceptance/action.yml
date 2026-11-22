@@ -12,8 +12,11 @@ inputs:
   required:
     description: "verify: the jobs this push would run, as a JSON array (a scope output) or one per line; reused only when each passed in the pull request. Empty requires every job the receipt names to have passed."
     default: ""
+  selections:
+    description: "The scope action's selections output: what each job checks. record stores the pull request's; verify reuses a job only when the push's selection is covered by the pull request's. Without it, verify requires the merge's parent to be green and ignores base."
+    default: ""
   base:
-    description: "verify: the scope action's base output, the commit required was measured from. Reuse needs a green trunk run of the workflow on it; without it, the merge's parent must have one."
+    description: "verify: the scope action's base output, the commit required and selections were measured from. With selections, reuse needs a green trunk run of the workflow on it; without selections it is ignored and the merge's parent must have one."
     default: ""
   variables:
     description: "toJSON(vars). A receipt recorded under other repository variables is not reused."
@@ -56,6 +59,7 @@ runs:
         INPUT_RESULTS: ${{ inputs.results }}
         INPUT_REQUIRED: ${{ inputs.required }}
         INPUT_BASE: ${{ inputs.base }}
+        INPUT_SELECTIONS: ${{ inputs.selections }}
         INPUT_VARIABLES: ${{ inputs.variables }}
         INPUT_WORKFLOW: ${{ inputs.workflow }}
         INPUT_NAME: ${{ inputs.name }}
