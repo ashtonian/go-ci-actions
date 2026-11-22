@@ -10,7 +10,7 @@ permissions:
   contents: read
   id-token: write
 env:
-  CI_ARTIFACT_ENDPOINT: ${{ vars.CI_ARTIFACT_ENDPOINT }}
+  CI_ARTIFACT_ENDPOINT: ${{ secrets.CI_ARTIFACT_ENDPOINT }}
 jobs:
   storage:
     runs-on: ${{ inputs.runner }}

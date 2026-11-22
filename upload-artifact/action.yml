@@ -2,7 +2,7 @@ name: upload-artifact
 description: Upload immutable ZIP artifacts to SeaweedFS using GitHub OIDC.
 inputs:
   endpoint:
-    description: "SeaweedFS artifact origin; normally supplied by vars.CI_ARTIFACT_ENDPOINT."
+    description: "SeaweedFS artifact origin; normally supplied by secrets.CI_ARTIFACT_ENDPOINT."
     default: ""
   bucket:
     description: "Artifact bucket."
