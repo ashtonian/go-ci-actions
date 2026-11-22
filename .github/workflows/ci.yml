@@ -640,11 +640,12 @@ jobs:
           test "$REMOTE_BUILD_HIT" != true
           test "$PROXY_BUILD_HIT" = true
           test "$PROXY_MODULES_HIT" != true
-  # A pull request whose selected jobs passed records a receipt for its merge
-  # commit's tree; the push of that tree then skips them (scope job).
+  # A pull request (or a run dispatched on its branch) whose selected jobs
+  # passed records a receipt for the tree it tested; the push of that tree
+  # then skips them (scope job).
   accepted:
     needs: [scope, smoke, verify, npm-registry, test-results]
-    if: github.event_name == 'pull_request' && !cancelled() && needs.scope.result == 'success' && !contains(needs.*.result, 'failure') && !contains(needs.*.result, 'cancelled')
+    if: (github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch') && !cancelled() && needs.scope.result == 'success' && !contains(needs.*.result, 'failure') && !contains(needs.*.result, 'cancelled')
     runs-on: arc-go-ci-actions
     timeout-minutes: 5
     permissions:

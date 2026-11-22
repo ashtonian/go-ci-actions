@@ -52,7 +52,7 @@ class Fixture:
 
 
 class FakeAPI:
-    """Pull request runs for the pull request lookup, trunk runs for the green-parent one."""
+    """Validation runs for the receipt lookup, trunk runs for the green-run ones."""
 
     def __init__(self, runs, trunk):
         self.runs = runs
@@ -61,7 +61,8 @@ class FakeAPI:
 
     def get(self, path, **query):
         self.calls.append((path, query))
-        return {"workflow_runs": self.runs if query.get("event") == "pull_request" else self.trunk}
+        # The green-run lookups ask for successful runs; the validation lookup does not.
+        return {"workflow_runs": self.trunk if query.get("status") == "success" else self.runs}
 
 
 def iso(timestamp):
@@ -181,7 +182,7 @@ class AcceptanceTests(unittest.TestCase):
             ("actions/workflows/ci.yml/runs",
              {"head_sha": self.fixture.base, "branch": "main", "status": "success", "per_page": 100}),
             ("actions/workflows/ci.yml/runs",
-             {"head_sha": self.fixture.head, "event": "pull_request", "per_page": 100})])
+             {"head_sha": self.fixture.head, "per_page": 100})])
 
     def test_called_workflow_names_its_own_file(self):
         with patch.dict(os.environ, {"INPUT_WORKFLOW": "ci.yml"}):
@@ -336,7 +337,7 @@ class AcceptanceTests(unittest.TestCase):
             (reused, reason), api = self.verify(trunk=[])
             self.assertTrue(reused, reason)
             self.assertIsNone(self.verdict.green_base)
-            self.assertEqual([call[1].get("event") for call in api.calls], ["pull_request"], "no trunk lookup")
+            self.assertEqual([call[1].get("status") for call in api.calls], [None], "no trunk lookup")
 
     def test_unscoped_checks_no_trunk_run(self):
         # The pull request ran every job on this tree.
@@ -344,7 +345,7 @@ class AcceptanceTests(unittest.TestCase):
             (reused, reason), api = self.verify(trunk=[])
             self.assertTrue(reused, reason)
             self.assertIsNone(self.verdict.green_base)
-            self.assertEqual([call[1].get("event") for call in api.calls], ["pull_request"])
+            self.assertEqual([call[1].get("status") for call in api.calls], [None])
 
     def test_a_job_is_reused_only_where_the_pull_request_checked_as_much(self):
         cases = {
@@ -379,6 +380,75 @@ class AcceptanceTests(unittest.TestCase):
                 self.assertFalse(reused, reason)
                 self.assertEqual(self.verdict.remaining, ["check"])
         self.assertTrue(acceptance.covers(None, []), "an empty selection needs no evidence")
+
+    def dispatch_receipt(self, ref="refs/heads/feature"):
+        # A run dispatched on the pull request's branch checks out its head.
+        git(self.repo, "checkout", "-q", self.fixture.head)
+        try:
+            return acceptance.build_receipt(self.env("workflow_dispatch", {"ref": ref}, GITHUB_SHA=self.fixture.head,
+                                                     GITHUB_REF=ref))
+        finally:
+            git(self.repo, "checkout", "-q", "main")
+
+    def test_a_dispatched_validation_of_the_head_serves_its_merge(self):
+        # A bot's pull request run cannot start, so the owner dispatches the
+        # workflow on its branch; the branch contains main, so the merge has
+        # the head's tree.
+        receipt = self.dispatch_receipt()
+        self.assertEqual((receipt["event"], receipt["source"]["sha"]), ("workflow_dispatch", self.fixture.head))
+        dispatched = self.run_record(event="workflow_dispatch", head_branch="feature")
+        (reused, reason), _ = self.verify(runs=[dispatched], receipt=receipt)
+        self.assertTrue(reused, reason)
+        # The bot's pull request run ended in startup_failure before the dispatch.
+        failed_start = self.run_record(id=40, conclusion="startup_failure", updated_at=iso(NOW - 1200))
+        (reused, reason), _ = self.verify(runs=[failed_start, dispatched], receipt=receipt)
+        self.assertTrue(reused, reason)
+        cases = {
+            "the merge has another tree": ({**receipt, "source": {**receipt["source"], "tree": "2" * 40}}, [dispatched]),
+            "the dispatch ran on another commit": ({**receipt, "source": {**receipt["source"], "sha": "3" * 40}}, [dispatched]),
+            "the receipt names another event": ({**receipt, "event": "pull_request"}, [dispatched]),
+            "a newer validation run failed": (receipt, [dispatched, self.run_record(id=43, conclusion="failure", updated_at=iso(NOW - 60))]),
+        }
+        for name, (candidate, runs) in cases.items():
+            with self.subTest(name):
+                (reused, reason), _ = self.verify(runs=runs, receipt=candidate)
+                self.assertFalse(reused, reason)
+        # A pull request receipt must still be for the merge, not the head.
+        (reused, reason), _ = self.verify(receipt={**receipt, "event": "pull_request"})
+        self.assertFalse(reused, reason)
+        self.assertIn("head", reason)
+
+    def test_a_dispatched_receipt_covers_only_what_it_recorded(self):
+        dispatched = self.run_record(event="workflow_dispatch", head_branch="feature")
+        results = json.dumps({"go": {"result": "success"}})
+        # record stores the caller's selections, never one derived from the event.
+        with patch.dict(os.environ, {"INPUT_RESULTS": results, "INPUT_SELECTIONS": json.dumps({"go": ["a"]})}):
+            narrowed = self.dispatch_receipt()
+        self.assertEqual(narrowed["selections"], {"go": ["a"]})
+        with patch.dict(os.environ, {"INPUT_RESULTS": results, "INPUT_SELECTIONS": ""}):
+            unrecorded = self.dispatch_receipt()
+        self.assertIsNone(unrecorded["selections"])
+        cases = {
+            # A fast-runner dispatch checked a; the push needs a and b.
+            "a narrowed dispatch against a wider push": (narrowed, json.dumps({"go": ["a", "b"]}), False),
+            "a narrowed dispatch against the same selection": (narrowed, json.dumps({"go": ["a"]}), True),
+            "a dispatch that recorded no selections": (unrecorded, json.dumps({"go": ["a"]}), False),
+            "a push that compares no selections": (narrowed, "", False),
+        }
+        for name, (receipt, needed, expected) in cases.items():
+            with self.subTest(name), patch.dict(os.environ, {"INPUT_REQUIRED": '["go"]', "INPUT_SELECTIONS": needed}):
+                (reused, reason), _ = self.verify(runs=[dispatched], receipt=receipt)
+                self.assertEqual(reused, expected, reason)
+
+    def test_a_dispatch_records_only_a_branch_head(self):
+        with self.assertRaises(ValueError):
+            self.dispatch_receipt(ref="refs/tags/v1")
+        with self.assertRaises(ValueError):
+            # The checkout (the merge) is not the commit the run was dispatched on.
+            acceptance.build_receipt(self.env("workflow_dispatch", {}, GITHUB_REF="refs/heads/feature",
+                                              GITHUB_SHA=self.fixture.head))
+        with self.assertRaises(ValueError):
+            acceptance.build_receipt(self.env("schedule", {}))
 
     def test_invalid_selections_fail_the_step(self):
         for selections in ('["go"]', '{"go": "some"}', '{"go": [1]}', '{"bad id": "all"}', "{not json"):

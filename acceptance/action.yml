@@ -4,7 +4,7 @@ description: >-
   tree, and let the push that merges the same tree skip the checks that passed.
 inputs:
   mode:
-    description: "record, in a pull request job that needs every validation job; verify, first in a push."
+    description: "record, in a pull request or workflow_dispatch job that needs every validation job; verify, first in a push."
     required: true
   results:
     description: "record: the needs context of the validation jobs, toJSON(needs). Each job succeeded or was skipped; skipped ones are recorded as not passed."

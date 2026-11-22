@@ -42,6 +42,8 @@ JOB_ID = re.compile(r"[A-Za-z_][A-Za-z0-9_-]*")
 # push runs the scope measured from a green base, a schedule runs everything.
 # A workflow_dispatch can narrow its work through inputs the scope never sees.
 TRUNK_EVENTS = {"push", "schedule"}
+# Events whose runs on a pull request's head validate it for its merge.
+VALIDATION_EVENTS = {"pull_request", "workflow_dispatch"}
 
 
 def commit(ref="HEAD"):
@@ -96,16 +98,26 @@ def event(env):
 
 
 def build_receipt(env):
-    """The receipt for this pull request run; raises when a validation job failed or was cancelled."""
-    if env.get("GITHUB_EVENT_NAME") != "pull_request":
-        raise ValueError("receipts record pull request validation only")
-    pull = event(env)["pull_request"]
+    """The receipt for this validation run; raises when a validation job failed or was cancelled.
+
+    A pull request run validates GitHub's merge commit of its head. A
+    workflow_dispatch run on a branch validates the branch head itself: a
+    pull request whose own run cannot start (a bot's) is validated that way,
+    and its receipt serves the merge when the merge has the head's tree.
+    """
+    event_name = env.get("GITHUB_EVENT_NAME")
+    if event_name not in VALIDATION_EVENTS:
+        raise ValueError("receipts record pull request or workflow_dispatch validation only")
     repository = env["GITHUB_REPOSITORY"]
-    if pull["head"]["repo"]["full_name"] != repository or pull["base"]["repo"]["full_name"] != repository:
-        raise ValueError("only a pull request from this repository records a receipt")
     source = commit()
-    if source["sha"] != env["GITHUB_SHA"] or len(source["parents"]) != 2 or source["parents"][1] != pull["head"]["sha"]:
-        raise ValueError("the checkout is not this pull request's merge commit")
+    if event_name == "pull_request":
+        pull = event(env)["pull_request"]
+        if pull["head"]["repo"]["full_name"] != repository or pull["base"]["repo"]["full_name"] != repository:
+            raise ValueError("only a pull request from this repository records a receipt")
+        if source["sha"] != env["GITHUB_SHA"] or len(source["parents"]) != 2 or source["parents"][1] != pull["head"]["sha"]:
+            raise ValueError("the checkout is not this pull request's merge commit")
+    elif not env.get("GITHUB_REF", "").startswith("refs/heads/") or source["sha"] != env["GITHUB_SHA"]:
+        raise ValueError("the checkout is not the head of the branch the run was dispatched on")
     results = json.loads(artifact.input_value("results") or "{}")
     if not isinstance(results, dict) or not results:
         raise ValueError("results must be the needs context of the validation jobs as JSON")
@@ -113,7 +125,7 @@ def build_receipt(env):
     failed = sorted(name for name, result in outcome.items() if result not in ("success", "skipped"))
     if failed:
         raise ValueError("validation did not pass: " + ", ".join(failed))
-    return {"version": RECEIPT_VERSION, "repository": repository, "workflow": workflow_path(env),
+    return {"version": RECEIPT_VERSION, "repository": repository, "workflow": workflow_path(env), "event": event_name,
             "run_id": int(env["GITHUB_RUN_ID"]), "run_attempt": int(env["GITHUB_RUN_ATTEMPT"]),
             "source": source, "variables": variables_digest(),
             "passed": sorted(name for name, result in outcome.items() if result == "success"),
@@ -308,30 +320,40 @@ def verify(env, api=None, receipts=fetch_receipt, now=time.time):
                 return Verdict(False, f"{what} has no green run of {Path(workflow).name}: "
                                "the push runs its scoped checks", False)
         runs = api.get(f"actions/workflows/{urllib.parse.quote(Path(workflow).name)}/runs",
-                       head_sha=head, event="pull_request", per_page=100)["workflow_runs"]
-        runs = [run for run in runs if run.get("head_sha") == head and run.get("event") == "pull_request"
+                       head_sha=head, per_page=100)["workflow_runs"]
+        runs = [run for run in runs if run.get("head_sha") == head and run.get("event") in VALIDATION_EVENTS
                 and (run.get("repository") or {}).get("full_name") == repository
                 and (run.get("head_repository") or {}).get("full_name") == repository]
         if not runs:
-            return Verdict(False, "no pull request run validated " + head, green_base)
+            return Verdict(False, "no pull request or dispatched run validated " + head, green_base)
         run = max(runs, key=lambda item: (item["updated_at"], item["id"]))
         max_age = float(artifact.input_value("max-age-hours", "6") or "6") * 3600
         if run.get("status") != "completed" or run.get("conclusion") != "success":
-            return Verdict(False, f"the latest pull request run did not pass: {run.get('html_url', run['id'])}", green_base)
+            return Verdict(False, f"the latest validation run did not pass: {run.get('html_url', run['id'])}", green_base)
         if not 0 <= now() - updated_at(run) <= max_age:
-            return Verdict(False, f"the latest pull request run is older than the receipt lifetime: {run.get('html_url', run['id'])}",
+            return Verdict(False, f"the latest validation run is older than the receipt lifetime: {run.get('html_url', run['id'])}",
                            green_base)
         receipt = receipts(run, receipt_name())
         if receipt is None:
-            return Verdict(False, f"the pull request run stored no receipt: {run.get('html_url', run['id'])}", green_base)
+            return Verdict(False, f"the validation run stored no receipt: {run.get('html_url', run['id'])}", green_base)
         expected = {"version": RECEIPT_VERSION, "repository": repository, "workflow": workflow,
                     "run_id": run["id"], "run_attempt": run["run_attempt"], "variables": variables_digest()}
         differs = sorted(key for key, value in expected.items() if receipt.get(key) != value)
+        if receipt.get("event", "pull_request") != run["event"]:
+            differs.append("event")
         recorded = receipt.get("source") or {}
         if recorded.get("tree") != source["tree"]:
             differs.append("tree")
-        if (recorded.get("parents") or [])[1:] != [head]:
+        # A pull request run tested the merge of the head; a dispatched run
+        # tested the head itself, whose tree the merge must then have.
+        validated = (recorded.get("parents") or [])[1:] == [head] if run["event"] == "pull_request" \
+            else recorded.get("sha") == head
+        if not validated:
             differs.append("head")
+        # A dispatch can narrow its jobs through inputs no scope sees, so its
+        # receipt is evidence only through the selections it recorded.
+        if run["event"] == "workflow_dispatch" and selections is None:
+            return Verdict(False, "a dispatched run's receipt is reused only against selections: every check runs", green_base)
         if differs:
             return Verdict(False, "the receipt does not match this push (" + ", ".join(differs) + "): every check runs", green_base)
         passed, skipped = receipt.get("passed"), receipt.get("skipped")
