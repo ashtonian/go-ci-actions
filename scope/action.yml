@@ -60,6 +60,8 @@ outputs:
     description: "Why the scope is what it is."
   go-packages:
     description: 'JSON object of module directory (relative to go-directory) to the package directories to check, relative to the module ("." or "./a"); "./..." for every package. Modules with nothing affected are absent.'
+  go-args:
+    description: "The affected Go packages as go command arguments from go-directory, space-separated: import paths, or each module's path/... when every package is in scope. In workspace mode one go test over them spans modules, in package list mode, so results cache."
   go-reason:
     description: "Why the Go packages are what they are."
 runs:

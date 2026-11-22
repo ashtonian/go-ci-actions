@@ -6,7 +6,7 @@ const path = require('node:path');
 const {input, output} = require('../lib/policy.cjs');
 const {github, workflowFile} = require('../lib/history.cjs');
 const {SHA, decideBase, lines, matcher, parseConfig, parseOwners, selectJobs, workflowJobs} = require('../lib/scope.cjs');
-const {LIST_FIELDS, affectedPackages, byModule, parseStream, rootDirs} = require('../lib/goaffected.cjs');
+const {LIST_FIELDS, affectedPackages, byModule, importArgs, parseStream, rootDirs} = require('../lib/goaffected.cjs');
 const GIT_TIMEOUT_MS = 120000;
 const GO_TIMEOUT_MS = 600000;
 const MAX_OUTPUT = 512 * 1024 * 1024;
@@ -91,12 +91,13 @@ async function main() {
   const unknown = config.jobs.map(job => job.id).filter(id => !defined.has(id));
   if (unknown.length) throw new Error('jobs names IDs ' + workflow + ' does not define: ' + unknown.join(', '));
   const head = headCommit();
+  const runsOf = async (file, branch) => (await get('actions/workflows/' + encodeURIComponent(file) + '/runs',
+    {branch, status: 'success', exclude_pull_requests: 'true', per_page: String(lookback)})).workflow_runs;
   let decision;
   try {
     decision = await decideBase({eventName: env.GITHUB_EVENT_NAME, payload, env, head, forceFull,
       fullLabel: input('full-label'),
-      greenRuns: async branch => (await get('actions/workflows/' + encodeURIComponent(workflow) + '/runs',
-        {branch, status: 'success', exclude_pull_requests: 'true', per_page: String(lookback)})).workflow_runs});
+      greenRuns: async branch => runsOf(workflow, branch), scheduledRuns: async branch => runsOf(workflowFile(env), branch)});
   } catch (error) {
     decision = {full: true, reason: 'run history unavailable (' + error.message + ')'};
     console.log('::warning::' + decision.reason + '; every job runs');
@@ -114,13 +115,14 @@ async function main() {
     }
   }
   const sharedFull = !decision.full && files.some(config.shared);
-  let goResult = null, goPackages = {};
+  let goResult = null, goPackages = {}, goArgs = '';
   if (config.jobs.some(job => job.usesGo)) {
     const scoped = goScope({full: decision.full, sharedFull, files, workspace: env.GITHUB_WORKSPACE,
       directory: input('go-directory') || '.', tags: input('go-tags'), ignore, owners});
     goResult = {full: scoped.result.full, reason: scoped.result.reason,
       dirs: scoped.result.full ? [] : rootDirs(scoped.root, scoped.result)};
     goPackages = byModule(scoped.root, scoped.modules, scoped.result);
+    goArgs = importArgs(scoped.modules, scoped.result).join(' ');
   }
   const selection = selectJobs(config, {full: decision.full, files, go: goResult});
   let filesPath = '';
@@ -137,6 +139,7 @@ async function main() {
   output('files', filesPath);
   output('reason', reason);
   output('go-packages', JSON.stringify(goPackages));
+  output('go-args', goArgs);
   output('go-reason', goResult ? goResult.reason : '');
   console.log('Scope: ' + reason);
   if (!decision.full) console.log(files.length + ' changed file(s)' + (files.length ? ':\n  ' + files.slice(0, 200).join('\n  ') : ''));

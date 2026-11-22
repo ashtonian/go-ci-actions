@@ -5,7 +5,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const {execFileSync} = require('node:child_process');
-const {LIST_FIELDS, affectedPackages, byModule, parseStream, rootDirs} = require('../lib/goaffected.cjs');
+const {LIST_FIELDS, affectedPackages, byModule, importArgs, parseStream, rootDirs} = require('../lib/goaffected.cjs');
 
 test('go list output parses object by object', () => {
   const text = '{\n\t"ImportPath": "a",\n\t"Module": {\n\t\t"Path": "a"\n\t}\n}\n{\n\t"ImportPath": "b"\n}\n';
@@ -56,7 +56,8 @@ function list(root, tags = '') {
 function affected(root, files, {tags = '', exists = fs.existsSync, owners} = {}) {
   const {modules, entries} = list(root, tags);
   const result = affectedPackages({root, modules, entries, changed: files.map(file => path.join(root, file)), exists, owners});
-  return {result, modules: byModule(root, modules, result), dirs: result.full ? [] : rootDirs(root, result)};
+  return {result, modules: byModule(root, modules, result), dirs: result.full ? [] : rootDirs(root, result),
+    args: importArgs(modules, result)};
 }
 
 // Without Go the package graph cannot be built; CI always has it.
@@ -65,6 +66,7 @@ const needsGo = goAvailable() || process.env.GITHUB_ACTIONS ? {} : {skip: 'go is
 test('a changed package affects itself and its reverse dependencies across modules', needsGo, t => {
   const root = workspace(t);
   assert.deepEqual(affected(root, ['lib/sub/sub.go']).modules, {app: ['.'], lib: ['./sub']});
+  assert.deepEqual(affected(root, ['lib/sub/sub.go']).args, ['example.com/app', 'example.com/lib/sub']);
   assert.deepEqual(affected(root, ['lib/lib.go']).modules, {app: ['.'], lib: ['.']}, 'an external test import counts');
   assert.deepEqual(affected(root, ['tool/tool.go']).modules, {tool: ['.']});
   assert.deepEqual(affected(root, ['app/main_test.go']).dirs, ['./app']);
@@ -100,6 +102,7 @@ test('anything the package graph cannot account for affects every package', need
     assert.equal(result.full, true, file);
     assert.match(result.reason, reason);
     assert.deepEqual(modules, {app: ['./...'], lib: ['./...'], tool: ['./...']});
+    assert.deepEqual(affected(root, [file]).args.sort(), ['example.com/app/...', 'example.com/lib/...', 'example.com/tool/...']);
   }
   const removed = affected(root, ['lib/gone/gone.go'], {exists: () => false}).result;
   assert.match(removed.reason, /Go file outside every remaining package was removed: lib\/gone\/gone\.go/);
@@ -118,4 +121,15 @@ test('declared owners make a file outside every package affect the packages that
   assert.deepEqual(affected(root, ['docs/guide.md'], {owners}).modules, {tool: ['.']});
   assert.deepEqual(affected(root, ['lib/README.md'], {owners}).modules, {app: ['.'], lib: ['.']}, 'in addition to its own package');
   assert.throws(() => affected(root, ['docs/guide.md'], {owners: () => [path.join(root, 'nowhere')]}), /go-owners names nowhere/);
+});
+
+test('the import-path arguments run as one go test across the workspace', needsGo, t => {
+  const root = workspace(t);
+  const {args} = affected(root, ['lib/sub/sub.go']);
+  const env = {...process.env, GOFLAGS: '', GOPROXY: 'off', GOTOOLCHAIN: 'local', GOWORK: path.join(root, 'go.work')};
+  const out = execFileSync('go', ['test', ...args], {cwd: root, env, encoding: 'utf8'});
+  assert.match(out, /example\.com\/app/);
+  assert.match(out, /example\.com\/lib\/sub/);
+  // Package list mode: an unchanged rerun replays from the test cache.
+  assert.match(execFileSync('go', ['test', ...args], {cwd: root, env, encoding: 'utf8'}), /ok\s+example\.com\/app\s+\(cached\)/);
 });

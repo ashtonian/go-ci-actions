@@ -122,6 +122,10 @@ test('a scheduled run skips a commit the last green scheduled run checked', asyn
   const same = await base('schedule', {}, {greenRuns: async () => [greenRun(5, {event: 'schedule', head_sha: H})]});
   assert.deepEqual([same.full, same.base], [false, H]);
   assert.equal((await base('schedule', {}, {forceFull: true})).full, true);
+  // A schedule that calls this workflow is judged by the caller's runs.
+  const called = await decideBase({eventName: 'schedule', payload: {}, env, head: {sha: H, parents: [B]}, fullLabel: '',
+    greenRuns: async () => [], scheduledRuns: async () => [greenRun(5, {event: 'schedule', head_sha: H})]});
+  assert.deepEqual([called.full, called.base], [false, H]);
 });
 
 test('jobs run when their paths change or their Go packages are affected', () => {
@@ -293,11 +297,13 @@ test('packaged action narrows Go jobs to the affected packages', async t => {
   assert.deepEqual(JSON.parse(outputs.jobs), ['test', 'docs']);
   assert.deepEqual(JSON.parse(outputs['wide-jobs']), ['docs']);
   assert.deepEqual(JSON.parse(outputs['go-packages']), {'.': ['./a', './b']});
+  assert.equal(outputs['go-args'], 'example.com/m/a example.com/m/b');
   const unignored = await runScope(t, repo, {event: 'pull_request',
     payload: {pull_request: {head: {sha: repo.head}, base: {sha: repo.base}, labels: []}},
     inputs: {INPUT_JOBS: JSON.stringify(jobs)}});
   assert.deepEqual(JSON.parse(unignored.outputs.jobs), ['test', 'image', 'docs'], 'an unowned file affects every package');
   assert.deepEqual(JSON.parse(unignored.outputs['go-packages']), {'.': ['./...']});
+  assert.equal(unignored.outputs['go-args'], 'example.com/m/...');
   assert.match(unignored.outputs['go-reason'], /no package owns docs\/guide\.md/);
 });
 
