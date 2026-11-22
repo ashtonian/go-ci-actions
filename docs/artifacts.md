@@ -80,9 +80,10 @@ python3 "$CI_ARTIFACT_TOOL" download --run-id "$SOURCE_RUN_ID" \
 
 `list` returns verified manifest identities. Consumers still verify the producing
 workflow, source/tree, run attempt and job conclusions through GitHub; possession
-of an archive does not prove a passing check. Existing historical GitHub receipts
-may use a read-only fallback until their original expiry. New writes have one
-backend. `gh run download` does not retrieve SeaweedFS artifacts. Outside Actions,
+of an archive does not prove a passing check. The `acceptance` action (README,
+Push acceptance) is such a consumer, for pull request validation receipts.
+Existing historical GitHub receipts may use a read-only fallback until their
+original expiry. New writes have one backend. `gh run download` does not retrieve SeaweedFS artifacts. Outside Actions,
 operators use the deployment's authenticated S3 access and the summary's object
 URI; the workflow token itself is short lived and is never published.
 
@@ -163,6 +164,7 @@ permissions are not an artifact contract; archive a tarball when those matter.
 ## Code map
 
 - `lib/artifact.py`: shared transport, manifests, archive rules and CLI.
+- `lib/acceptance.py`, `acceptance/`: pull request validation receipts and their push-time verification.
 - `lib/artifact-entry.cjs`: bounded Python launch for Node actions.
 - `upload-artifact/`, `download-artifact/`, `artifact-setup/`: action interfaces.
 - `test/artifact_test.py`, `test/artifact-native.py`: contract and native checks.

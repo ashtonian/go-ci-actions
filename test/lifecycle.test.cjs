@@ -6,8 +6,10 @@ const os = require('node:os');
 const path = require('node:path');
 const {spawnSync} = require('node:child_process');
 
+// Only the directories the GitHub cache archives are walked: build objects
+// with the github backend, modules without a module proxy.
 for (const [mode, backend, proxy] of [['read-write', 'github', ''], ['read-only', 'github', ''], ['read-write', 'remote', ''],
-  ['read-write', 'remote', 'http://proxy:3000']]) {
+  ['read-write', 'github', 'http://proxy:3000'], ['read-write', 'remote', 'http://proxy:3000']]) {
   test('packaged post hook honors ' + mode + ' with the ' + backend + ' build cache' + (proxy ? ' and a module proxy' : ''), t => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), 'go-ci-post-'));
     t.after(() => fs.rmSync(root, {recursive: true, force: true}));
@@ -26,10 +28,15 @@ for (const [mode, backend, proxy] of [['read-write', 'github', ''], ['read-only'
       env: {...process.env, STATE_cache: JSON.stringify(state), GITHUB_STEP_SUMMARY: summary}, encoding: 'utf8'
     });
     assert.equal(result.status, 0, result.stderr);
-    assert.equal(fs.existsSync(stale), mode === 'read-only' || backend === 'remote');
+    const buildArchived = backend === 'github', modulesArchived = !proxy;
+    assert.equal(fs.existsSync(stale), mode === 'read-only' || !buildArchived);
     assert.equal(fs.readFileSync(path.join(modules, 'source'), 'utf8'), 'module source');
-    assert.match(result.stdout, /Go cache metrics:/);
-    assert.match(fs.readFileSync(summary, 'utf8'), new RegExp('\\| ' + backend + ' \\| ' + (proxy ? 'proxy' : 'archive') + ' \\|'));
-    assert.match(result.stdout, new RegExp('"moduleSource":"' + (proxy ? 'proxy' : 'archive') + '"'));
+    const metrics = JSON.parse(/Go cache metrics: (.*)/.exec(result.stdout)[1]);
+    assert.equal(metrics.moduleSource, proxy ? 'proxy' : 'archive');
+    assert.equal(metrics.buildBytes, buildArchived ? (mode === 'read-only' ? 6 : 3) : null);
+    assert.equal(metrics.moduleBytes, modulesArchived ? 13 : null);
+    const row = fs.readFileSync(summary, 'utf8');
+    assert.match(row, new RegExp('\\| ' + backend + ' \\| ' + (proxy ? 'proxy' : 'archive') + ' \\|'));
+    assert.equal(row.includes('not archived'), !buildArchived || !modulesArchived);
   });
 }

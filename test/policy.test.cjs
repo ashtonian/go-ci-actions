@@ -4,7 +4,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
-const {archivePaths, buildCache, identity, hours, moduleProxy, npmRegistry, validatePaths} = require('../lib/policy.cjs');
+const {archived, archivePaths, buildCache, identity, hours, moduleProxy, npmRegistry, validatePaths} = require('../lib/policy.cjs');
 const {trim, measure} = require('../lib/cache.cjs');
 const values = {workflow: 'CI', job: 'test', workload: '{"race":true}',
   'dependency-hash': 'abc123', os: 'Linux', arch: 'X64', 'run-id': '123', 'run-attempt': '1',
@@ -56,7 +56,21 @@ test('a module proxy takes modules out of every archive', () => {
   const cases = [
     ['github', 'archive', '/b\n/m'], ['github', 'proxy', '/b'], ['remote', 'archive', '/m'], ['remote', 'proxy', ''],
   ];
-  for (const [backend, modules, want] of cases) assert.equal(archivePaths(backend, modules, '/b', '/m'), want, backend + '/' + modules);
+  for (const [backend, modules, want] of cases) {
+    assert.equal(archivePaths('read-write', backend, modules, '/b', '/m'), want, backend + '/' + modules);
+    assert.equal(archivePaths('read-only', backend, modules, '/b', '/m'), want, 'read-only ' + backend + '/' + modules);
+    assert.equal(archivePaths('off', backend, modules, '/b', '/m'), '', 'off ' + backend + '/' + modules);
+  }
+});
+test('off mode archives nothing and has no key', () => {
+  for (const backend of ['github', 'remote']) {
+    for (const modules of ['archive', 'proxy']) {
+      assert.deepEqual(archived('off', backend, modules), {build: false, modules: false});
+      assert.deepEqual(identity({...values, 'cache-mode': 'off', backend, modules}, 'go1.26.9'), {key: '', 'restore-keys': ''});
+    }
+  }
+  assert.throws(() => identity({...values, 'cache-mode': 'off', 'max-staleness-hours': 'x'}, 'go1.26.9'),
+    'inputs are validated in off mode too');
 });
 test('the runner module proxy goes first only when ready and the job has no GOPROXY', async t => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'go-ci-proxy-'));

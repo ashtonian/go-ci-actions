@@ -14,12 +14,10 @@ inputs:
     description: Matrix identity, build flags and external C library versions.
     default: ""
   cache-dependency-path:
-    description: Dependency manifest patterns hashed into the cache key.
-    default: |
-      **/go.mod
-      **/go.sum
-      **/go.work
-      **/go.work.sum
+    description: >-
+      Dependency manifest patterns hashed into the archive key, relative to the workspace, one per line; `!` excludes.
+      Empty hashes every go.mod, go.sum, go.work and go.work.sum under the directory holding go-version-file.
+    default: ""
   cache-mode:
     description: "read-write, read-only, or off."
     default: read-write
@@ -52,7 +50,7 @@ outputs:
     description: The runner module proxy in use, or empty when modules download as the job configures them.
     value: ${{ steps.identity.outputs.module-proxy }}
   cache-primary-key:
-    description: Key this job saves under; fresh per run unless the build cache is remote, and empty when nothing is archived.
+    description: Key this job saves under; fresh per run unless the build cache is remote, and empty when nothing is archived (including cache-mode off).
     value: ${{ steps.identity.outputs.key }}
   cache-matched-key:
     description: Restored key or empty on a miss.
@@ -76,7 +74,8 @@ runs:
         workflow: ${{ github.workflow }}
         job: ${{ github.job }}
         workload: ${{ inputs.workload }}
-        dependency-hash: ${{ hashFiles(inputs.cache-dependency-path) }}
+        cache-dependency-path: ${{ inputs.cache-dependency-path }}
+        go-version-file: ${{ inputs.go-version-file }}
         os: ${{ runner.os }}
         arch: ${{ runner.arch }}
         run-id: ${{ github.run_id }}
@@ -88,7 +87,7 @@ runs:
         build-cache-backend: ${{ inputs.build-cache-backend }}
         module-proxy: ${{ inputs.module-proxy }}
     - name: Restore Go cache
-      if: inputs.cache-mode != 'off' && steps.identity.outputs.paths != ''
+      if: steps.identity.outputs.paths != ''
       id: restore
       uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       with:
@@ -104,7 +103,7 @@ runs:
         lookup-only: true
     # Reverse post ordering trims before the official cache action uploads.
     - uses: $/_lifecycle
-      if: inputs.cache-mode != 'off'
+      if: steps.identity.outputs.paths != ''
       with:
         build: ${{ steps.identity.outputs.build }}
         modules: ${{ steps.identity.outputs.modules }}

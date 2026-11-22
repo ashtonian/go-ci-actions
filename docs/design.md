@@ -49,6 +49,15 @@ the container's filesystem/environment. Discovery does not install software,
 copy credentials or change cache authorization. A missing helper retains the
 existing archive fallback; invalid published configuration fails explicitly.
 
+Setup does no work for an archive that does not exist. With the remote
+backend and a ready module proxy nothing is archived. Measured on 2026-11-22,
+hashing every manifest in the workspace took 6.8-7.3 s in estavelle jobs that
+check out gox and karsto beside it, and walking the plugin directory and module
+cache after the job covered 9.8 GB on estavelle's build job, for a key and
+sizes nothing uses. So the identity step computes the digest only when an
+archive needs a key, over the module go-version-file names rather than the
+whole workspace, and the post step walks only archived directories.
+
 The lifecycle hook is declared after actions/cache, so reverse post ordering
 prunes before upload. Its cutoff is relative to setup start, preserving objects
 used early in long jobs. Failed/cancelled jobs do not publish state; read-only
@@ -60,6 +69,22 @@ exposes the actual matched key for both cache modes. The combined cache action
 registers a successful post-save with lookup-only and no fallback keys, avoiding
 a second download. The read-write warm-cache contract also verifies the published
 key output and the existence of its new saved entry.
+
+Change scope lives here rather than in each consumer because every repository
+needs the same three decisions and they are easy to get subtly wrong: what a
+change is measured from, which files a job depends on, and what to do when
+that cannot be known. A push is measured from the last green run of its
+workflow, not from `before`: a cancelled or failed predecessor would otherwise
+drop its changes from every later run. A pull request's receipt records the
+jobs its scope skipped as skipped, and a push reuses it only for jobs the
+receipt shows passed, because the two runs measure from different bases. For
+Go, a file maps to a package and the affected set follows the test-inclusive
+reverse dependency graph from `go list -e -test`, which sees cross-module
+imports in a workspace and test-only imports. Every unresolved case (a
+manifest, a file no package owns, an unloadable graph) widens to every
+package, and the nightly or dispatched full run is the backstop for inputs no
+static graph sees, such as a test reading a file from another package's
+directory at run time.
 
 Rollout: local policy/lifecycle tests, packaged Linux/macOS smoke and native
 cache lifecycle probes, small consumer canaries, then remaining repositories.
