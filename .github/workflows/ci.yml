@@ -16,8 +16,47 @@ env:
   GOCACHE: ${{ github.workspace }}/.contract-build
   GOMODCACHE: ${{ github.workspace }}/.contract-modules
 jobs:
-  smoke:
+  # Which contract jobs this change needs (scope/), and on a push whether the
+  # pull request already passed them on the same tree (acceptance/). Job IDs
+  # in the scope are the jobs the record job needs: verify stands for the
+  # cache contract it checks.
+  scope:
     if: github.actor == 'ashtonian' && (github.event_name != 'pull_request' || github.event.pull_request.user.login == 'ashtonian')
+    runs-on: arc-go-ci-actions
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      actions: read
+      id-token: write
+    env:
+      CI_ARTIFACT_ENDPOINT: ${{ secrets.CI_ARTIFACT_ENDPOINT }}
+    outputs:
+      jobs: ${{ steps.accepted.outputs.reused == 'true' && '[]' || steps.scope.outputs.jobs }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - id: scope
+        uses: ./scope
+        with:
+          jobs: |
+            {
+              "smoke": ["**/*.cjs", "**/*.py", "**/action.yml", "package.json", "test/**", "fixtures/**"],
+              "verify": ["action.yml", "_identity/**", "_lifecycle/**", "lib/cache.cjs", "lib/manifests.cjs", "lib/policy.cjs", "fixtures/**"],
+              "npm-registry": ["npm-registry/**", "lib/policy.cjs"]
+            }
+          shared: |
+            .github/workflows/ci.yml
+      - id: accepted
+        if: github.event_name == 'push'
+        uses: ./acceptance
+        with:
+          mode: verify
+          required: ${{ steps.scope.outputs.jobs }}
+          variables: ${{ toJSON(vars) }}
+  smoke:
+    needs: scope
+    if: contains(needs.scope.outputs.jobs, '"smoke"')
     strategy:
       fail-fast: false
       matrix:
@@ -31,21 +70,23 @@ jobs:
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: "24"
-      - run: npm test
-      - name: Acceptance receipt contracts
-        run: python3 -m unittest discover -s test -p acceptance_test.py
       - uses: ./
         with:
           go-version-file: fixtures/go.work
           workload: ${{ toJSON(matrix) }}
           cache-key-prefix: smoke-v1
+      # After setup: the scope tests load real Go package graphs.
+      - run: npm test
+      - name: Acceptance receipt contracts
+        run: python3 -m unittest discover -s test -p acceptance_test.py
       - run: go test -race ./...
         working-directory: fixtures
       - name: Validate workflow syntax
         if: runner.os == 'Linux'
         run: go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
   seed:
-    if: github.actor == 'ashtonian' && (github.event_name != 'pull_request' || github.event.pull_request.user.login == 'ashtonian')
+    needs: scope
+    if: contains(needs.scope.outputs.jobs, '"verify"')
     runs-on: arc-go-ci-actions
     timeout-minutes: 15
     outputs:
@@ -146,7 +187,8 @@ jobs:
   # gocacheprog on PATH. The stub plugin is never started. The module archive
   # key hashes only the manifests under go-version-file's directory.
   remote:
-    if: github.actor == 'ashtonian' && (github.event_name != 'pull_request' || github.event.pull_request.user.login == 'ashtonian')
+    needs: scope
+    if: contains(needs.scope.outputs.jobs, '"verify"')
     runs-on: arc-go-ci-actions
     timeout-minutes: 15
     outputs:
@@ -193,7 +235,8 @@ jobs:
   # A runner that provides a ready module proxy: modules stay out of the
   # archive, which then holds only build objects.
   proxy:
-    if: github.actor == 'ashtonian' && (github.event_name != 'pull_request' || github.event.pull_request.user.login == 'ashtonian')
+    needs: scope
+    if: contains(needs.scope.outputs.jobs, '"verify"')
     runs-on: arc-go-ci-actions
     timeout-minutes: 15
     outputs:
@@ -236,7 +279,8 @@ jobs:
           echo module > "$GOMODCACHE/proxy-sentinel"
   # A runner proxy that does not answer: modules download as without one.
   proxy-down:
-    if: github.actor == 'ashtonian' && (github.event_name != 'pull_request' || github.event.pull_request.user.login == 'ashtonian')
+    needs: scope
+    if: contains(needs.scope.outputs.jobs, '"verify"')
     runs-on: arc-go-ci-actions
     timeout-minutes: 15
     env:
@@ -263,7 +307,8 @@ jobs:
   # The npm registry cache is used only when it answers and the job names no
   # registry of its own; otherwise installs use the registry as configured.
   npm-registry:
-    if: github.actor == 'ashtonian' && (github.event_name != 'pull_request' || github.event.pull_request.user.login == 'ashtonian')
+    needs: scope
+    if: contains(needs.scope.outputs.jobs, '"npm-registry"')
     runs-on: arc-go-ci-actions
     timeout-minutes: 10
     steps:
@@ -326,7 +371,8 @@ jobs:
           test -z "$NAMED"
           test -z "$OFF"
   container:
-    if: github.actor == 'ashtonian' && (github.event_name != 'pull_request' || github.event.pull_request.user.login == 'ashtonian')
+    needs: scope
+    if: contains(needs.scope.outputs.jobs, '"verify"')
     runs-on: arc-go-ci-actions
     timeout-minutes: 15
     permissions:
@@ -413,8 +459,8 @@ jobs:
           echo failed > "$GOCACHE/failed-only"
           exit 17
   verify:
-    if: always() && !cancelled() && github.actor == 'ashtonian'
-    needs: [seed, restore, disabled, failed, smoke, warm, remote, proxy, proxy-down, container]
+    if: always() && !cancelled() && contains(needs.scope.outputs.jobs, '"verify"')
+    needs: [scope, seed, restore, disabled, failed, warm, remote, proxy, proxy-down, container]
     runs-on: arc-go-ci-actions
     timeout-minutes: 15
     steps:
@@ -422,7 +468,6 @@ jobs:
           SEED: ${{ needs.seed.result }}
           RESTORE: ${{ needs.restore.result }}
           DISABLED: ${{ needs.disabled.result }}
-          SMOKE: ${{ needs.smoke.result }}
           WARM: ${{ needs.warm.result }}
           REMOTE: ${{ needs.remote.result }}
           PROXY: ${{ needs.proxy.result }}
@@ -434,7 +479,6 @@ jobs:
           test "$SEED" = success
           test "$RESTORE" = success
           test "$DISABLED" = success
-          test "$SMOKE" = success
           test "$WARM" = success
           test "$REMOTE" = success
           test "$PROXY" = success
@@ -510,3 +554,24 @@ jobs:
           test "$REMOTE_BUILD_HIT" != true
           test "$PROXY_BUILD_HIT" = true
           test "$PROXY_MODULES_HIT" != true
+  # A pull request whose selected jobs passed records a receipt for its merge
+  # commit's tree; the push of that tree then skips them (scope job).
+  accepted:
+    needs: [scope, smoke, verify, npm-registry]
+    if: github.event_name == 'pull_request' && !cancelled() && needs.scope.result == 'success' && !contains(needs.*.result, 'failure') && !contains(needs.*.result, 'cancelled')
+    runs-on: arc-go-ci-actions
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      CI_ARTIFACT_ENDPOINT: ${{ secrets.CI_ARTIFACT_ENDPOINT }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./acceptance
+        with:
+          mode: record
+          results: ${{ toJSON(needs) }}
+          variables: ${{ toJSON(vars) }}
