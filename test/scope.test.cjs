@@ -1,7 +1,8 @@
 'use strict';
 const {test} = require('node:test');
 const assert = require('node:assert/strict');
-const {decideBase, globRegExp, goPattern, parseConfig, parseOwners, selectJobs, workflowJobs} = require('../lib/scope.cjs');
+const {decideBase, describeBuild, globRegExp, goPattern, parseBuilds, parseConfig, parseOwners, selectJobs, workflowJobs} =
+  require('../lib/scope.cjs');
 
 const A = 'a'.repeat(40), B = 'b'.repeat(40), C = 'c'.repeat(40), H = 'd'.repeat(40);
 
@@ -51,6 +52,27 @@ test('the job IDs of a workflow file are its top-level jobs keys', () => {
     '    steps:', '      - id: lint', '  test: # tests', '    needs: scope', '  build-and-scan:', 'other:', '  late:'].join('\n');
   assert.deepEqual([...workflowJobs(text)], ['scope', 'test', 'build-and-scan']);
   assert.deepEqual([...workflowJobs('jobs:\n    a:\n      b:\n    c:\n')], ['a', 'c']);
+});
+
+test('the build configurations are every go-builds line with every go-tags tag set', () => {
+  assert.deepEqual(parseBuilds('', 'conformance e2e smoke'), [{env: {}, tags: ['conformance', 'e2e', 'smoke']}],
+    'one go-tags line is one tag set');
+  assert.deepEqual(parseBuilds('', ''), [{env: {}, tags: []}]);
+  const builds = parseBuilds('# platforms\nGOOS=linux GOARCH=amd64\nGOOS=windows tags=slow\n', '-\nunit\nunit,integration\n');
+  assert.deepEqual(builds, [
+    {env: {GOOS: 'linux', GOARCH: 'amd64'}, tags: []},
+    {env: {GOOS: 'linux', GOARCH: 'amd64'}, tags: ['unit']},
+    {env: {GOOS: 'linux', GOARCH: 'amd64'}, tags: ['unit', 'integration']},
+    {env: {GOOS: 'windows'}, tags: ['slow']},
+    {env: {GOOS: 'windows'}, tags: ['slow', 'unit']},
+    {env: {GOOS: 'windows'}, tags: ['slow', 'unit', 'integration']},
+  ]);
+  assert.equal(describeBuild(builds[5]), 'GOOS=windows tags=slow,unit,integration');
+  assert.equal(describeBuild({env: {}, tags: []}), 'the runner platform');
+  for (const bad of ['GOFLAGS=-mod=mod', 'GOOS', 'goos=linux', 'GOOS=linux;rm', 'PATH=/tmp']) {
+    assert.throws(() => parseBuilds(bad, ''), /go-builds/, bad);
+  }
+  assert.throws(() => parseBuilds('', 'unit;rm'), /go-tags/);
 });
 
 test('go-owners maps globs to the packages that read them', () => {
@@ -122,6 +144,10 @@ test('a scheduled run skips a commit the last green scheduled run checked', asyn
   const same = await base('schedule', {}, {greenRuns: async () => [greenRun(5, {event: 'schedule', head_sha: H})]});
   assert.deepEqual([same.full, same.base], [false, H]);
   assert.equal((await base('schedule', {}, {forceFull: true})).full, true);
+  // A schedule that calls this workflow is judged by the caller's runs.
+  const called = await decideBase({eventName: 'schedule', payload: {}, env, head: {sha: H, parents: [B]}, fullLabel: '',
+    greenRuns: async () => [], scheduledRuns: async () => [greenRun(5, {event: 'schedule', head_sha: H})]});
+  assert.deepEqual([called.full, called.base], [false, H]);
 });
 
 test('jobs run when their paths change or their Go packages are affected', () => {
@@ -293,11 +319,13 @@ test('packaged action narrows Go jobs to the affected packages', async t => {
   assert.deepEqual(JSON.parse(outputs.jobs), ['test', 'docs']);
   assert.deepEqual(JSON.parse(outputs['wide-jobs']), ['docs']);
   assert.deepEqual(JSON.parse(outputs['go-packages']), {'.': ['./a', './b']});
+  assert.equal(outputs['go-args'], 'example.com/m/a example.com/m/b');
   const unignored = await runScope(t, repo, {event: 'pull_request',
     payload: {pull_request: {head: {sha: repo.head}, base: {sha: repo.base}, labels: []}},
     inputs: {INPUT_JOBS: JSON.stringify(jobs)}});
   assert.deepEqual(JSON.parse(unignored.outputs.jobs), ['test', 'image', 'docs'], 'an unowned file affects every package');
   assert.deepEqual(JSON.parse(unignored.outputs['go-packages']), {'.': ['./...']});
+  assert.equal(unignored.outputs['go-args'], 'example.com/m/...');
   assert.match(unignored.outputs['go-reason'], /no package owns docs\/guide\.md/);
 });
 
@@ -306,4 +334,21 @@ test('packaged action refuses a job the workflow does not define', async t => {
   await assert.rejects(runScope(t, repo, {event: 'pull_request',
     payload: {pull_request: {head: {sha: repo.head}, base: {sha: repo.base}, labels: []}},
     inputs: {INPUT_JOBS: JSON.stringify({docs: ['docs/**'], lnit: ['**']})}}), /ci\.yml does not define: lnit/);
+});
+
+test('packaged action loads each go-builds configuration', async t => {
+  let go = true;
+  try { execFileSync('go', ['version'], {stdio: 'ignore'}); } catch { go = false; }
+  if (!go && !process.env.GITHUB_ACTIONS) return t.skip('go is not on PATH');
+  if (process.platform === 'win32') return t.skip('the host is the Windows configuration');
+  const repo = repository(t, {'go.mod': 'module example.com/m\n\ngo 1.22\n', 'a/a.go': 'package a\n', 'w/w_windows.go': 'package w\n'},
+    {'w/w_windows.go': 'package w\n\nconst X = 1\n'});
+  const pull = {pull_request: {head: {sha: repo.head}, base: {sha: repo.base}, labels: []}};
+  const jobs = JSON.stringify({test: {go: ['./...']}});
+  const host = await runScope(t, repo, {event: 'pull_request', payload: pull, inputs: {INPUT_JOBS: jobs}});
+  assert.match(host.outputs['go-reason'], /no package owns w\/w_windows\.go/);
+  const both = await runScope(t, repo, {event: 'pull_request', payload: pull,
+    inputs: {INPUT_JOBS: jobs, 'INPUT_GO-BUILDS': '\nGOOS=windows GOARCH=amd64\n'}});
+  assert.deepEqual(JSON.parse(both.outputs['go-packages']), {'.': ['./w']});
+  assert.match(both.stdout, /Go package graph: GOOS=windows GOARCH=amd64/);
 });

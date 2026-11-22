@@ -401,8 +401,9 @@ changed".
 - **Full runs.** `workflow_dispatch`, a pull request labelled `full-label`
   (`full-ci`), `full: true`, a tag push and any other event run every job and
   every package. A `schedule` run does too, unless the newest green scheduled
-  run of the workflow on the branch was on this same commit: then the branch
-  has not moved since the last green nightly and nothing runs. So does
+  run on the branch of the workflow the schedule triggers (the caller, when
+  this is a reusable workflow) was on this same commit: then the branch has
+  not moved since the last green nightly and nothing runs. So does
   anything the scope cannot decide: no green run to compare with, a
   run-history API error, a base that cannot be fetched or diffed. Those log a
   warning and set `reason`.
@@ -416,8 +417,9 @@ changed".
   stay within a segment, dot files match, everything else is literal.
 - **Go packages.** When a job names Go package patterns (`./...`, `./dir/...`,
   `./dir`, `.`, relative to `go-directory`), the scope loads the package graph
-  of every module in the workspace with `go list -e -test` (with `go-tags`)
-  and computes the affected packages: each package that holds a changed file,
+  of every module in the workspace with `go list -e -test` (with `go-tags`),
+  once per `go-builds` configuration, unioned, and computes the affected
+  packages: each package that holds a changed file,
   plus every package whose build or tests depend on one, across modules. A
   file belongs to the package of its directory, of an ancestor whose
   `testdata` tree holds it, or that embeds it. A package that fails to load is
@@ -431,6 +433,20 @@ changed".
   `go-owners` entry: list documentation and other files no Go code reads in
   `go-ignore`, never code inputs. Grep the tests for `ReadFile`, `Open` and
   `Glob` of relative paths before narrowing either list.
+- **Build configurations.** A repository that builds for several platforms or
+  tag sets lists them, and the scope loads one graph per `go-builds` line and
+  `go-tags` line, every pair, and unions them. `go-builds` lines are
+  `KEY=VALUE` pairs from GOOS, GOARCH, GOARM, GOAMD64, GOARM64, CGO_ENABLED,
+  GOEXPERIMENT and `tags=a,b` (added to every tag set), for example
+  `GOOS=linux GOARCH=amd64` and `GOOS=darwin GOARCH=arm64`; none is the
+  runner's own platform. `go-tags` lines are tag sets (`unit,integration`;
+  `-` is the empty set); one line is one set, and none is no tags. List each
+  set a constraint can tell apart: a superset does not cover a file behind
+  `!integration`. In the union a package that builds only for one platform or
+  tag set is owned and its dependents found, and an error only some
+  configurations hit (build constraints excluding every file) does not make
+  it broken. Each configuration is one `go list` over the workspace, about a
+  second on a dozen-module workspace once modules are in the cache.
 
 The job IDs in `jobs` are the workflow's job IDs, and the jobs gate on the
 scope job's output with `contains(needs.scope.outputs.jobs, '"<id>"')` (a
@@ -447,7 +463,7 @@ jobs:
     env:
       CI_ARTIFACT_ENDPOINT: ${{ secrets.CI_ARTIFACT_ENDPOINT }}
     outputs:
-      jobs: ${{ steps.accepted.outputs.reused == 'true' && '[]' || steps.scope.outputs.jobs }}
+      jobs: ${{ steps.accepted.outputs.remaining || steps.scope.outputs.jobs }}
       wide-jobs: ${{ steps.scope.outputs.wide-jobs }}
       go-packages: ${{ steps.scope.outputs.go-packages }}
     steps:
@@ -490,8 +506,9 @@ jobs:
 Inputs: `jobs` (required), `shared`, `full` (`false`), `full-label`
 (`full-ci`), `workflow` (the workflow file whose green runs are a push's base;
 default the running workflow, and a called workflow names its own file),
-`lookback` (20, 1-100), `go-directory` (`.`), `go-tags`, `go-ignore`,
-`go-owners` (JSON, glob to package directories) and `token`
+`lookback` (20, 1-100), `go-directory` (`.`), `go-tags` (tag sets, one per
+line), `go-builds`,
+`go-ignore`, `go-owners` (JSON, glob to package directories) and `token`
 (`github.token`; needs `actions: read` for a push and `contents: read`).
 Outputs: `full` (`true` when every job and package is in scope), `jobs` (JSON
 array of the selected job IDs, in `jobs` order), `wide-jobs` (the selected
@@ -499,7 +516,18 @@ jobs that check every package), `base`, `files` (a file
 listing the changed paths, one per line; empty for a full run), `reason`,
 `go-packages` (JSON object of module directory, relative to `go-directory`, to
 the package directories to check relative to the module, `"./..."` for all;
-modules with nothing affected are absent) and `go-reason`. The log lists the
+modules with nothing affected are absent), `go-args` (the affected packages'
+import paths, space-separated, or each module's `path/...` when every package
+is in scope) and `go-reason`. `go-args` runs from `go-directory` as one `go
+test` across a workspace's modules. Both forms name packages, which puts `go
+test` in package list mode: it caches test results, so with the remote cache
+an affected package whose test inputs did not change replays from cache
+rather than running (flags such as `-count=1` turn that off). The lists hold
+every affected package of the graph loaded with `go-tags`, including packages
+that exist only under a tag or hold only test files. `go test` and `go vet
+-tags ...` take them all; a command that names packages without the tags, or
+`go build`, refuses those two kinds by name, so leave them out first (`go list
+-e` reports a tag-only package's error, and a test-only one has no `GoFiles`). The log lists the
 changed files, each job's decision and why, and the Go packages; the job
 summary repeats the decision. Invalid `jobs`, globs or patterns fail the step,
 and so does a job ID the workflow file does not define (a typo would otherwise
@@ -533,16 +561,30 @@ same workflow file over it again repeats work whose result is known.
 - **verify** runs first in the push. It outputs `reused=true` only when the
   push is the first attempt of a push to the default branch, the pushed commit
   is a merge whose first parent is the previous head (`before`), the latest
-  pull request run of the same workflow file for its second parent completed
+  commit it merges onto (its first parent) has a successful run of the same
+  workflow file on the default branch (`green_parent`), the latest pull
+  request run of that workflow for its second parent completed
   successfully within `max-age-hours` (6), that run's final attempt stored a
   receipt with the same tree, head, workflow file, variables digest, run ID
   and attempt, and every job in `required` passed in it. `required` is the
-  push's own scope (the scope action's `jobs` output): a job the pull request
-  skipped counts only when the push does not need it either. With `required`
-  empty, every job the receipt names must have passed. Anything else, an API
-  or storage error included, gives `reused=false` with the reason in
-  `reason`, the log and the job summary, and every check runs. Only invalid
-  inputs fail the step.
+  push's own scope (the scope action's `jobs` output). Reuse is per job:
+  `remaining` lists the required jobs the push still runs, those the matching
+  receipt does not show passed (a job the pull request skipped, such as a
+  heavy suite it runs only with `full-ci`), so the rest are skipped even when
+  some must run; `reused` is true when none remain. Without a matching receipt
+  on a green parent `remaining` is every required job. With `required` empty,
+  every job the receipt names must have passed and `remaining` is empty.
+  Anything else, an API or storage error included, gives `reused=false` with
+  the reason in `reason`, the log and the job summary, and the push's jobs
+  run. Only invalid inputs fail the step.
+
+The green parent closes a gap scoped runs open. A pull request's receipt
+proves only the jobs its change touched. If the push it merges onto failed a
+job the pull request skipped, reusing the receipt would turn that red trunk
+commit into the next green base and the failure would never be checked again.
+So a push onto a parent without a green run of the workflow runs its scoped
+checks, measured from the last green run. The nightly full run is the
+backstop for anything else on trunk.
 
 Tree equality covers the workflow file and everything else in the repository.
 Repository variables are compared through their digest; secrets, the runner
@@ -585,8 +627,11 @@ names its own, for example `ci.yml`), `name` (`acceptance`), `max-age-hours`
 (`6`), `token` (`github.token`, needs `actions: read` for verify) and
 `endpoint` (default `CI_ARTIFACT_ENDPOINT`). Both modes need the commit checked
 out (a shallow clone is enough), `id-token: write` for the artifact gateway
-and `CI_ARTIFACT_ENDPOINT` (a repository secret). Outputs: `reused` and
-`reason` (verify).
+and `CI_ARTIFACT_ENDPOINT` (a repository secret). Outputs (verify): `reused`,
+`remaining` (JSON array of the required jobs to run; the scope job's `jobs`
+output is `remaining || scope.jobs`, since verify does not run on pull
+requests), `reason` and `green_parent` (`true`, `false`, or empty when verify
+stopped before asking).
 
 The receipt proves only what the run's own validation proved. Possession of
 an archive is not trusted on its own: the run lookup, its conclusion and the
@@ -597,8 +642,9 @@ the push run's acceptance step: `no pull request run validated <sha>` means the
 merge was not a merge commit of a tested head, `older than the receipt
 lifetime` means the pull request sat longer than `max-age-hours`, `did not pass
 <jobs>` means the push needs jobs the pull request's scope skipped (its base
-differed from the push's), and an `acceptance evidence unavailable` reason
-names the API or gateway error.
+differed from the push's), `has no green run` means the commit the merge sits
+on failed, is still running, or never ran the workflow, and an `acceptance
+evidence unavailable` reason names the API or gateway error.
 
 ## Unchanged scheduled runs
 
@@ -614,7 +660,8 @@ another commit ends the search with `passed=false`: the jobs have something new
 to check. A run that skipped every named job is passed over. Otherwise the
 newest run that ran them decides: `passed=true` only when every matching job
 succeeded, so a failure on this commit runs them again the next time. A name
-covers the job of that name and its matrix variants, `name (variant)`. An API
+covers the job of that name, its matrix variants, `name (variant)`, and, for a
+job that calls a reusable workflow, every job it calls, `name / job`. An API
 error gives `passed=false` with a notice: missing evidence never skips work.
 After `lookback` runs that all skipped the jobs, they run again, which bounds
 how long an unchanged commit goes without them.

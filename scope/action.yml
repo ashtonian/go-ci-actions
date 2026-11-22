@@ -30,7 +30,14 @@ inputs:
     description: "Directory holding go.work or go.mod, relative to the workspace, for jobs that name Go packages."
     default: "."
   go-tags:
-    description: "Build tags for loading the package graph, so files behind them count."
+    description: 'Build tag sets for loading the package graph, one per line ("unit,integration"; "-" is the empty set), so files behind them count. Each is loaded for every go-builds line and the graphs unioned.'
+    default: ""
+  go-builds:
+    description: >-
+      Platforms to load the package graph for, one per line as KEY=VALUE pairs
+      (GOOS, GOARCH, GOARM, GOAMD64, GOARM64, CGO_ENABLED, GOEXPERIMENT,
+      tags=a,b added to every tag set), such as "GOOS=darwin GOARCH=arm64".
+      Empty is the runner's own platform.
     default: ""
   go-ignore:
     description: "Path globs, one per line, of changed files that affect no Go package (documentation). Any other file no package owns affects every package."
@@ -60,6 +67,8 @@ outputs:
     description: "Why the scope is what it is."
   go-packages:
     description: 'JSON object of module directory (relative to go-directory) to the package directories to check, relative to the module ("." or "./a"); "./..." for every package. Modules with nothing affected are absent.'
+  go-args:
+    description: "The affected Go packages as go command arguments from go-directory, space-separated: import paths, or each module's path/... when every package is in scope. In workspace mode one go test over them spans modules, in package list mode, so results cache."
   go-reason:
     description: "Why the Go packages are what they are."
 runs:

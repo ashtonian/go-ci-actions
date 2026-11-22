@@ -5,7 +5,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const {execFileSync} = require('node:child_process');
-const {LIST_FIELDS, affectedPackages, byModule, parseStream, rootDirs} = require('../lib/goaffected.cjs');
+const {LIST_FIELDS, affectedPackages, byModule, importArgs, parseStream, rootDirs} = require('../lib/goaffected.cjs');
 
 test('go list output parses object by object', () => {
   const text = '{\n\t"ImportPath": "a",\n\t"Module": {\n\t\t"Path": "a"\n\t}\n}\n{\n\t"ImportPath": "b"\n}\n';
@@ -15,8 +15,9 @@ test('go list output parses object by object', () => {
 });
 
 // A workspace of three modules: app imports lib/sub (and lib only from an
-// external test), tool is independent, and lib/tagged builds only under the
-// "integration" tag.
+// external test, and lib/winonly only on Windows), tool is independent,
+// lib/tagged builds only under the "integration" tag, lib/notint only
+// without it, and lib/winonly only for Windows.
 const FILES = {
   'go.work': 'go 1.22\n\nuse (\n\t./lib\n\t./app\n\t./tool\n)\n',
   'lib/go.mod': 'module example.com/lib\n\ngo 1.22\n',
@@ -30,6 +31,9 @@ const FILES = {
   'app/go.mod': 'module example.com/app\n\ngo 1.22\n\nrequire example.com/lib v0.0.0\n',
   'app/main.go': 'package main\n\nimport _ "example.com/lib/sub"\n\nfunc main() {}\n',
   'app/main_test.go': 'package main_test\n\nimport (\n\t"testing"\n\n\t_ "example.com/lib"\n)\n\nfunc TestMain(t *testing.T) {}\n',
+  'lib/winonly/winonly_windows.go': 'package winonly\n',
+  'lib/notint/notint.go': '//go:build !integration\n\npackage notint\n',
+  'app/main_windows.go': 'package main\n\nimport _ "example.com/lib/winonly"\n',
   'tool/go.mod': 'module example.com/tool\n\ngo 1.22\n',
   'tool/tool.go': 'package tool\n',
 };
@@ -45,18 +49,20 @@ function workspace(t) {
   }
   return root;
 }
-function list(root, tags = '') {
-  const env = {...process.env, GOFLAGS: '', GOPROXY: 'off', GOTOOLCHAIN: 'local', GOWORK: path.join(root, 'go.work')};
-  const go = args => parseStream(execFileSync('go', args, {cwd: root, env, encoding: 'utf8'}));
+// The unioned graphs of each build configuration, as the scope action loads them.
+function list(root, builds) {
+  const base = {...process.env, GOFLAGS: '', GOPROXY: 'off', GOTOOLCHAIN: 'local', GOWORK: path.join(root, 'go.work')};
+  const go = (args, env = {}) => parseStream(execFileSync('go', args, {cwd: root, env: {...base, ...env}, encoding: 'utf8'}));
   const modules = go(['list', '-m', '-json']);
-  const entries = go(['list', '-e', '-test', '-json=' + LIST_FIELDS, ...(tags ? ['-tags', tags] : []),
-    ...modules.map(module => module.Path + '/...')]);
+  const entries = builds.flatMap(build => go(['list', '-e', '-test', '-json=' + LIST_FIELDS,
+    ...(build.tags ? ['-tags', build.tags] : []), ...modules.map(module => module.Path + '/...')], build.env));
   return {modules, entries};
 }
-function affected(root, files, {tags = '', exists = fs.existsSync, owners} = {}) {
-  const {modules, entries} = list(root, tags);
+function affected(root, files, {tags = '', builds = [{tags}], exists = fs.existsSync, owners} = {}) {
+  const {modules, entries} = list(root, builds);
   const result = affectedPackages({root, modules, entries, changed: files.map(file => path.join(root, file)), exists, owners});
-  return {result, modules: byModule(root, modules, result), dirs: result.full ? [] : rootDirs(root, result)};
+  return {result, modules: byModule(root, modules, result), dirs: result.full ? [] : rootDirs(root, result),
+    args: importArgs(modules, result)};
 }
 
 // Without Go the package graph cannot be built; CI always has it.
@@ -65,6 +71,7 @@ const needsGo = goAvailable() || process.env.GITHUB_ACTIONS ? {} : {skip: 'go is
 test('a changed package affects itself and its reverse dependencies across modules', needsGo, t => {
   const root = workspace(t);
   assert.deepEqual(affected(root, ['lib/sub/sub.go']).modules, {app: ['.'], lib: ['./sub']});
+  assert.deepEqual(affected(root, ['lib/sub/sub.go']).args, ['example.com/app', 'example.com/lib/sub']);
   assert.deepEqual(affected(root, ['lib/lib.go']).modules, {app: ['.'], lib: ['.']}, 'an external test import counts');
   assert.deepEqual(affected(root, ['tool/tool.go']).modules, {tool: ['.']});
   assert.deepEqual(affected(root, ['app/main_test.go']).dirs, ['./app']);
@@ -100,6 +107,7 @@ test('anything the package graph cannot account for affects every package', need
     assert.equal(result.full, true, file);
     assert.match(result.reason, reason);
     assert.deepEqual(modules, {app: ['./...'], lib: ['./...'], tool: ['./...']});
+    assert.deepEqual(affected(root, [file]).args.sort(), ['example.com/app/...', 'example.com/lib/...', 'example.com/tool/...']);
   }
   const removed = affected(root, ['lib/gone/gone.go'], {exists: () => false}).result;
   assert.match(removed.reason, /Go file outside every remaining package was removed: lib\/gone\/gone\.go/);
@@ -118,4 +126,31 @@ test('declared owners make a file outside every package affect the packages that
   assert.deepEqual(affected(root, ['docs/guide.md'], {owners}).modules, {tool: ['.']});
   assert.deepEqual(affected(root, ['lib/README.md'], {owners}).modules, {app: ['.'], lib: ['.']}, 'in addition to its own package');
   assert.throws(() => affected(root, ['docs/guide.md'], {owners: () => [path.join(root, 'nowhere')]}), /go-owners names nowhere/);
+});
+
+test('the import-path arguments run as one go test across the workspace', needsGo, t => {
+  const root = workspace(t);
+  const {args} = affected(root, ['lib/sub/sub.go']);
+  const env = {...process.env, GOFLAGS: '', GOPROXY: 'off', GOTOOLCHAIN: 'local', GOWORK: path.join(root, 'go.work')};
+  const out = execFileSync('go', ['test', ...args], {cwd: root, env, encoding: 'utf8'});
+  assert.match(out, /example\.com\/app/);
+  assert.match(out, /example\.com\/lib\/sub/);
+  // Package list mode: an unchanged rerun replays from the test cache.
+  assert.match(execFileSync('go', ['test', ...args], {cwd: root, env, encoding: 'utf8'}), /ok\s+example\.com\/app\s+\(cached\)/);
+});
+
+test('the graphs of several build configurations are unioned', needsGo, t => {
+  const root = workspace(t);
+  const host = {tags: ''}, windows = {env: {GOOS: 'windows', GOARCH: 'amd64'}, tags: ''};
+  if (process.platform === 'win32') return t.skip('the host is the Windows configuration');
+  assert.match(affected(root, ['lib/winonly/winonly_windows.go']).result.reason, /no package owns lib\/winonly/,
+    'the host graph alone does not hold the Windows package');
+  assert.deepEqual(affected(root, ['lib/winonly/winonly_windows.go'], {builds: [host, windows]}).modules,
+    {app: ['.'], lib: ['./winonly']});
+  assert.deepEqual(affected(root, ['lib/sub/sub.go'], {builds: [host, windows, {tags: 'integration'}]}).modules,
+    {app: ['.'], lib: ['./sub', './tagged']}, 'each configuration adds what it builds');
+  // A tag set is not covered by its superset when a constraint negates a tag.
+  assert.equal(affected(root, ['lib/notint/notint.go'], {builds: [{tags: 'integration'}]}).result.full, true);
+  assert.deepEqual(affected(root, ['lib/notint/notint.go'], {builds: [{tags: ''}, {tags: 'integration'}]}).modules,
+    {lib: ['./notint']});
 });

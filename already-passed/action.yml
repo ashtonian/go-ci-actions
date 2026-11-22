@@ -5,7 +5,7 @@ description: >-
   nothing new to check.
 inputs:
   jobs:
-    description: "Job names, one per line; a name also covers its matrix variants, \"name (variant)\"."
+    description: "Job names, one per line; a name also covers its matrix variants, \"name (variant)\", and, for a job that calls a reusable workflow, the jobs it calls, \"name / job\"."
     required: true
   event:
     description: "Event of the earlier runs to consult."
