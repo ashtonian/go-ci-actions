@@ -777,6 +777,79 @@ and `token` (`github.token`; needs `actions: read`). Outputs: `passed` and
 `reason`, which the log repeats. It makes at most `lookback + 1` API calls,
 each with a 10-second timeout.
 
+## Runner labels
+
+`ashtonian/go-ci-actions/runner-labels@FULL_COMMIT_SHA` fails a workflow that
+names a self-hosted runner label no runner of the repository carries. GitHub
+never assigns such a job: it waits until it is cancelled, and its run holds
+its concurrency group the whole time, so one stale label can stop a branch's
+CI for a day. Runner metrics cannot show it, because no runner ever takes the
+job. A static allowlist in each repository drifts as runner sets come and go;
+this asks the site's runner label service, which serves the labels of the
+runner sets that exist now for one repository: its own and its
+organization's.
+
+It reads every workflow in `workflows` (`.github/workflows`):
+
+- `runs-on` as a label, a flow or block list, or `labels:` beside a `group:`;
+- in an expression, each string literal that is a result
+  (`vars.RUNNER || 'arc-x'`, `cond && 'arc-a' || 'arc-b'`), not an operand
+  (`github.event_name == 'push'`), and each item of a literal JSON array
+  (`fromJSON('["arc-a","macos-latest"]')`);
+- through `${{ matrix.KEY }}`, the matrix's values for `KEY` and its
+  `include` entries';
+- the inputs named `runner` or `*-runner` of a reusable workflow call, and the
+  defaults of such inputs in `workflow_call`.
+
+A `runs-on` mapping, block or flow (`{group: g, labels: [a]}`), contributes
+its `labels`; a runner group alone names no label to check. Result literals
+count inside parentheses too (`(c && 'arc-a') || 'arc-b'`).
+
+A label passes when the list holds it, when it is a GitHub-hosted image
+(`ubuntu-*`, `windows-*`, `macos-*`), or when it matches an `allow` pattern.
+Anything else is an error annotated at its line. An expression with no
+literal (`${{ inputs.runner }}`) is checked where its value is written.
+
+The list comes from `labels-file` when given, else from the runner label
+service: `endpoint`, else the runner's `CI_RUNNER_LABELS_URL`, else
+`runnerLabelsURL` in the runner bundle (`$RUNNER_TOOL_CACHE/go-ci-cache/v1/config.json`,
+which a job container sees as well). It sends
+`GET <endpoint>/v1/labels?repository=<owner>/<name>` and expects `200` with
+`{"labels": [...]}`, with a 3-second connect and a 10-second read timeout and
+a 1 MiB answer limit, and follows no redirect. Each URL must be HTTP(S)
+without credentials or a fragment, as for the other runner services.
+
+Failure modes, and what each does:
+
+| Case | Result |
+|---|---|
+| A workflow names a label the list lacks | an error annotation at its line; the step fails |
+| The service refuses, times out, redirects, answers non-`200`, oversized or malformed | `::warning::runner label check skipped: <why>`, `checked=false`, the step passes |
+| No source: no input, variable or bundle entry (a GitHub-hosted runner, a host outside the cluster) | the same warning, naming what is missing |
+| The runner's own URL is malformed | the same warning: it is the runner's to fix, not the change's |
+| The `endpoint` input is malformed | the step fails |
+
+Skipping rather than failing keeps the service from becoming a hard
+dependency of every repository's CI; the site's alerting on queued jobs is
+the backstop, and the warning says the check did not run.
+
+```yaml
+jobs:
+  lint:
+    runs-on: <runner>
+    steps:
+      - uses: actions/checkout@<sha>
+        with: {persist-credentials: false}
+      - uses: ashtonian/go-ci-actions/runner-labels@FULL_COMMIT_SHA
+```
+
+Inputs: `endpoint`, `labels-file` (a list, `{"labels": [...]}`, or
+`{scope: [...]}` keyed by owner and `owner/name`, as the site's
+`runner-labels.py labels` prints for a dev host), `repository`
+(`github.repository`), `workflows` and `allow` (fnmatch patterns, one per
+line). Output: `checked`. Permissions: none beyond the checkout's `contents:
+read`; it sends no token, and the service needs none. Python 3.9+.
+
 ## Ownership and validation
 
 This repository owns toolchain/cache policy. Consumers own build/test commands.
@@ -811,8 +884,11 @@ after a same-size fixture edit. No npm dependencies. `test/acceptance_test.py`
 receipt is recorded only for a same-repository pull request merge commit with
 no failed or cancelled job, that it lists passed and skipped jobs apart, and
 that verify reuses validation only for a matching receipt that passed every
-required job, against a real Git merge fixture; the smoke job runs it. The
-history tests cover already-passed's decision over earlier runs and the
+required job, against a real Git merge fixture; the smoke job runs it.
+`test/runner_labels_test.py` covers every place a workflow names a runner, the
+scoped and per-scope label files, and that a missing, failing or malformed
+service passes with a warning while a definitive list fails; the smoke job
+runs it too. The history tests cover already-passed's decision over earlier runs and the
 packaged action against a stub API. The buildx-cache tests cover the tag per
 ref and platform, the GitHub-cache fallback, input validation, and the
 packaged action refusing a multi-platform cache on a two-node builder. The scope tests cover globs, Go package

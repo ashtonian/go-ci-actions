@@ -1,0 +1,37 @@
+name: runner-labels
+description: >-
+  Fail when a workflow names a self-hosted runner label that no runner of this
+  repository carries, so its jobs would wait until cancelled. Passes with a
+  warning when the label list cannot be had.
+inputs:
+  endpoint:
+    description: "Runner label service origin; defaults to the runner's CI_RUNNER_LABELS_URL."
+    default: ""
+  labels-file:
+    description: "JSON file of labels instead of the service: a list, {\"labels\": [...]}, or {scope: [...]} keyed by owner and owner/repository."
+    default: ""
+  repository:
+    description: "The repository whose runners' labels apply, as owner/name."
+    default: ${{ github.repository }}
+  workflows:
+    description: "Directory of the workflows to check."
+    default: .github/workflows
+  allow:
+    description: "fnmatch patterns, one per line, of further labels to accept (runners the service does not know). GitHub-hosted ubuntu-*, windows-* and macos-* always pass."
+    default: ""
+outputs:
+  checked:
+    description: "true when the workflows were checked against a label list; false when none could be had."
+    value: ${{ steps.check.outputs.checked }}
+runs:
+  using: composite
+  steps:
+    - id: check
+      shell: bash
+      env:
+        INPUT_ENDPOINT: ${{ inputs.endpoint }}
+        INPUT_LABELS_FILE: ${{ inputs.labels-file }}
+        INPUT_REPOSITORY: ${{ inputs.repository }}
+        INPUT_WORKFLOWS: ${{ inputs.workflows }}
+        INPUT_ALLOW: ${{ inputs.allow }}
+      run: python3 "$GITHUB_ACTION_PATH/../lib/runner_labels.py"
