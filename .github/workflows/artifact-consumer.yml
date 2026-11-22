@@ -6,6 +6,12 @@ on:
         description: Runner label used by the consuming repository
         required: true
         type: string
+    # A called workflow sees only the secrets its caller passes; pass this one
+    # alone rather than inherit every secret the caller holds.
+    secrets:
+      CI_ARTIFACT_ENDPOINT:
+        description: Artifact gateway origin, kept in a secret so run logs mask it
+        required: true
 permissions:
   contents: read
   id-token: write
