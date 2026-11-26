@@ -23,7 +23,10 @@ jobs:
   # in the scope are the jobs the record job needs: verify stands for the
   # cache contract it checks.
   scope:
-    if: github.actor == 'ashtonian' && (github.event_name != 'pull_request' || github.event.pull_request.user.login == 'ashtonian')
+    # A pull request from a fork would run untrusted code on the self-hosted
+    # runners. Every other job needs this one and gates on its outcome, so
+    # skipping it skips them.
+    if: github.actor == 'ashtonian' && (github.event_name != 'pull_request' || (github.event.pull_request.user.login == 'ashtonian' && github.event.pull_request.head.repo.full_name == github.repository))
     runs-on: arc-go-ci-actions
     timeout-minutes: 5
     permissions:

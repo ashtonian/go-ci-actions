@@ -19,6 +19,10 @@ env:
   CI_ARTIFACT_ENDPOINT: ${{ secrets.CI_ARTIFACT_ENDPOINT }}
 jobs:
   storage:
+    # The caller's event and repository apply here, so this covers every
+    # caller: a pull request from a fork would run untrusted code on the
+    # caller's self-hosted runner.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ${{ inputs.runner }}
     timeout-minutes: 5
     defaults:

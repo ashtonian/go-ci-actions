@@ -101,7 +101,9 @@ round trip without running application suites. Trigger it when artifact workflow
 configuration changes; the shared native contract owns the full isolation tests.
 A called workflow sees only the secrets its caller passes, so pass the endpoint
 explicitly, not with `secrets: inherit`, which would hand it every secret the
-repository holds:
+repository holds. The called workflow skips a pull request from a fork, which
+would otherwise run on the caller's self-hosted runner; a required status check
+counts that skipped job as passed:
 
 ```yaml
 jobs:
