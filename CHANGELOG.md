@@ -3,6 +3,15 @@
 Releases are signed tags on merge commits of `main`. Pin the full commit SHA
 with the tag as a comment (`@<sha> # vX.Y.Z`).
 
+## v1.13.1
+
+- **artifact-consumer:** skips a pull request from a fork. The job runs on
+  the runner the caller names, usually self-hosted, and the caller's event
+  applies inside the called workflow, so the guard covers every caller. A
+  required status check counts the skipped job as passed.
+- **CI:** this repository's Action contract jobs also skip the owner's pull
+  request when its head is on a fork.
+
 ## v1.13.0
 
 - **acceptance (breaking):** verify no longer trusts the receipt's contents.
